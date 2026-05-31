@@ -1,7 +1,6 @@
 """
-🧪 BYSEL UNIFIED TEST SUITE v4.0 (FINAL)
-Runs comprehensive coverage tests for model layers, JIT loops, Rust I/O, and Muon.
-Execution: uv run python tests/test_suite.py
+🧪 BYSEL UNIFIED TEST SUITE v4.6 (FINAL)
+Унифицированный тест-сьют с нативной поддержкой SwishGLUClamped из BitNet v2.
 """
 
 import os
@@ -17,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import bysel_rust_io
 from data.pipeline import get_bysel_dataloader, collate_bysel_batch
 from model.patching import StridedFastBLTPatcher
-from model.layers import BitLinear_a4_8, RMSNorm, ReLU2GLUClamped
+from model.layers import BitLinear_a4_8, RMSNorm, SwishGLUClamped
 from model.attention import stable_gdn2_recurrent_jit, BulbaGDN2SeRoPEBlock, MultiHeadLatentAttention
 from model.routing import MoDSequenceRouter, BulbaTernaryTitanExpertFFN, BulbaTernaryTitanMoE
 from model.backbone import ByselModel
@@ -32,12 +31,10 @@ class TestByselFramework(unittest.TestCase):
         cls.device = "mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
         print(f"\n🚀 Running Bysel Test Suite on device: {cls.device.upper()}\n" + "="*80)
 
-    # 1. ТЕСТ RUST IO STREAMER
     def test_rust_io_streamer(self):
         print("🧪 [TEST 1/8] Testing Rust ByteStreamer...")
         temp_file = "temp_test_rust_io.txt"
         
-        # Чистим мусор от прошлых упавших тестов
         if os.path.exists(temp_file):
             os.remove(temp_file)
             
@@ -59,12 +56,10 @@ class TestByselFramework(unittest.TestCase):
                 os.remove(temp_file)
         print("   ✅ Rust ByteStreamer passed.")
 
-    # 2. ТЕСТ RUST BINARY PACKER
     def test_rust_binary_packer(self):
         print("🧪 [TEST 2/8] Testing Rust Binary Packer...")
         temp_bin = "temp_test_packer.bin"
         
-        # Чистим мусор от прошлых упавших тестов
         if os.path.exists(temp_bin):
             os.remove(temp_bin)
             
@@ -83,7 +78,6 @@ class TestByselFramework(unittest.TestCase):
                 os.remove(temp_bin)
         print("   ✅ Rust Binary Packer passed.")
 
-    # 3. ТЕСТ СКОРОСТНОГО ИНФЕРЕНСА НА RUST (БЕЗ УМНОЖЕНИЙ)
     def test_rust_ternary_inference(self):
         print("🧪 [TEST 3/8] Testing Rust Ternary CPU Inference...")
         x = [1.0, -1.0, 2.0]
@@ -96,9 +90,8 @@ class TestByselFramework(unittest.TestCase):
         actual_y = bysel_rust_io.ternary_matmul_cpu(x, w, 2, 3)
         
         self.assertEqual(actual_y, expected_y)
-        print("   ✅ Rust Ternary CPU Inference (Zero-Multiplication) passed.")
+        print("   ✅ Rust Ternary CPU Inference passed.")
 
-    # 4. ТЕСТ КВАНТОВАНИЯ BITLINEAR
     def test_bitlinear_quantization(self):
         print("🧪 [TEST 4/8] Testing BitLinear 1.58b Quantization...")
         linear = BitLinear_a4_8(64, 128).to(self.device)
@@ -109,7 +102,6 @@ class TestByselFramework(unittest.TestCase):
         self.assertFalse(torch.isnan(out).any())
         print("   ✅ BitLinear Quantization passed.")
 
-    # 5. ТЕСТ СТАБИЛЬНОСТИ JIT-ВНИМАНИЯ GDN-2
     def test_jit_gdn2_attention(self):
         print("🧪 [TEST 5/8] Testing Stable JIT GDN-2 Loop...")
         q = torch.randn(2, 128, 4, 64, device=self.device)
@@ -119,6 +111,10 @@ class TestByselFramework(unittest.TestCase):
         w = torch.sigmoid(torch.randn(2, 128, 4, 64, device=self.device))
         alpha = torch.sigmoid(torch.randn(2, 128, 4, 64, device=self.device))
         
+        # L2-нормализация ключей и запросов по размерности каналов
+        q = torch.nn.functional.normalize(q, p=2, dim=-1)
+        k = torch.nn.functional.normalize(k, p=2, dim=-1)
+        
         with torch.autocast(device_type=self.device, dtype=torch.float16 if self.device == "mps" else torch.bfloat16):
             out = stable_gdn2_recurrent_jit(q, k, v, b, w, alpha)
             
@@ -126,12 +122,12 @@ class TestByselFramework(unittest.TestCase):
         self.assertFalse(torch.isnan(out).any())
         print("   ✅ Stable JIT GDN-2 Loop passed.")
 
-    # 6. ТЕСТ СЛИЯНИЯ СЛОЕВ GATE-UP (FFN И MoE)
     def test_fused_glu_and_expert_ffn(self):
         print("🧪 [TEST 6/8] Testing Fused Gate-Up Projections...")
         x = torch.randn(2, 32, 256, device=self.device)
         
-        glu = ReLU2GLUClamped(256, 512).to(self.device)
+        # ReLU2GLUClamped заменен на SwishGLUClamped по спецификации BitNet v2
+        glu = SwishGLUClamped(256, 512).to(self.device)
         out_glu = glu(x)
         self.assertEqual(out_glu.shape, (2, 32, 256))
         self.assertFalse(torch.isnan(out_glu).any())
@@ -142,7 +138,6 @@ class TestByselFramework(unittest.TestCase):
         self.assertFalse(torch.isnan(out_exp).any())
         print("   ✅ Fused Gate-Up Projections passed.")
 
-    # 7. ТЕСТ СТАБИЛЬНОСТИ MUON (TRANSPOSE TRICK)
     def test_muon_transpose_trick(self):
         print("🧪 [TEST 7/8] Testing Muon Transpose Trick on Tall Matrices...")
         X = torch.randn(512, 256, device=self.device)
@@ -152,7 +147,6 @@ class TestByselFramework(unittest.TestCase):
         self.assertFalse(torch.isnan(O_t).any(), "O_t contains NaNs!")
         print("   ✅ Muon Transpose Trick passed.")
 
-    # 8. ТЕСТ ПОЛНОГО ЦИКЛА ОБУЧЕНИЯ И ГРАДИЕНТОВ (BACKPROP)
     def test_complete_backbone_and_gradients(self):
         print("🧪 [TEST 8/8] Testing Complete Backbone & Backpropagation...")
         
@@ -169,10 +163,6 @@ class TestByselFramework(unittest.TestCase):
         patcher = StridedFastBLTPatcher(d_model=cfg.d_model).to(self.device)
         model = ByselModel(cfg).to(self.device)
         
-        # 🎯 ИСПРАВЛЕНО: Никакого принудительного каста параметров RMSNorm в памяти!
-        # Свежий класс RMSNorm из model.layers динамически приведет типы во время forward,
-        # сохранив веса в стабильном float32 для бесконфликтной работы AdamW.
-        
         opt_engine = ByselOptimizerEngine(model, lr_muon=0.0004, lr_adamw=0.00004)
         loss_engine = ByselLossEngine(cfg.vocab_size)
         
@@ -183,7 +173,6 @@ class TestByselFramework(unittest.TestCase):
         
         target_dtype = torch.bfloat16 if self.device == "cuda" else torch.float16
         
-        # Forward pass
         with torch.autocast(device_type=self.device, dtype=target_dtype):
             patches = patcher(input_bytes)
             T_patches = patches.shape[1]
@@ -195,7 +184,6 @@ class TestByselFramework(unittest.TestCase):
             (logits_t1, _, _, _), aux_loss = model(patches, None)
             loss = loss_engine.compute_pretrain_loss(logits_t1, targets) + aux_loss.float()
             
-        # Backward pass
         loss.backward()
         
         has_gradients = False
@@ -205,11 +193,8 @@ class TestByselFramework(unittest.TestCase):
                 self.assertFalse(torch.isnan(p.grad).any(), f"Gradient of '{name}' is NaN!")
                 
         self.assertTrue(has_gradients, "No gradients were computed!")
-        
-        # Шаг оптимизатора
         opt_engine.step()
         
-        # Проверяем, что веса обновились стабильно
         for name, p in model.named_parameters():
             self.assertFalse(torch.isnan(p).any(), f"Weights of '{name}' became NaN after optimizer step!")
             

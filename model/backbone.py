@@ -5,7 +5,7 @@
 ║ Компоненты:                                                               ║
 ║  • ByselDecoderLayer: Returns pure, unaccumulated f_l(h_l) transformation  ║
 ║  • ManifoldConstrainedAttnRes (mAR): Exact Birkhoff Attention over depth  ║
-║  • ByselModel: Proper sequential routing of unaccumulated layer outputs   ║
+║  • ByselModel: proper sequential routing of unaccumulated layer outputs   ║
 ╚═══════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 from model.layers import BitLinear_a4_8, RMSNorm, nvtx_range_push, nvtx_range_pop
 from model.attention import BulbaGDN2SeRoPEBlock, MultiHeadLatentAttention
-from model.routing import MoDSequenceRouter, BulbaTernaryTitantMoE
+from model.routing import MoDSequenceRouter, BulbaTernaryTitanMoE
 
 
 class ManifoldConstrainedAttnRes(nn.Module):
@@ -79,8 +79,6 @@ class ByselDecoderLayer(nn.Module):
             attn_out = self.attn(self.attn_norm(x))
             moe_out, aux_loss = self.moe(self.moe_norm(attn_out), progress=progress)
             
-            # 🎯 КРИТИЧЕСКИЙ ФИКС ATTNRES:
-            # Мы больше не складываем выход с входом (x + moe_out).
             # Слой возвращает строго чистый неаккумулированный выход преобразования f_l(h_l).
             return moe_out, aux_loss
             
@@ -184,8 +182,7 @@ class ByselModel(nn.Module):
     def forward(self, x, next_token_ids=None, progress=0.0):
         nvtx_range_push("ByselModel_Forward")
         
-        # 🎯 ИНИЦИАЛИЗАЦИЯ ИСТОЧНИКОВ ATTNRES:
-        # Изначально список содержит только h_1 (выход патчера)
+        # Инициализация источников AttnRes исходными эмбеддингами h_1
         prev_outputs = [x]
         total_aux_loss = 0.0
         

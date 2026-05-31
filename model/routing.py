@@ -1,11 +1,12 @@
 """
-⚙️ BYSEL ROUTING v3.6 - Stable MoE & MoD
+⚙️ BYSEL ROUTING v4.0 - Stable MoE & MoD
+Интегрирован SwishGLUClamped в эксперты MoE и down-проекции переведены на H-BitLinear.
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from model.layers import BitLinear_a4_8, LearnableClampSTE, nvtx_range_push, nvtx_range_pop
+from model.layers import BitLinear_a4_8, H_BitLinear, SwishGLUClamped, LearnableClampSTE, nvtx_range_push, nvtx_range_pop
 
 
 class MoDSequenceRouter(nn.Module):
@@ -31,28 +32,15 @@ class MoDSequenceRouter(nn.Module):
 
 class BulbaTernaryTitanExpertFFN(nn.Module):
     """
-    FFN-блок одного MoE-эксперта с объединенной проекцией Gate-Up.
-    Сокращает число вызовов ядер GPU в 2 раза.
+    FFN-блок одного MoE-эксперта со слиянием проекций Gate-Up.
+    Нативно использует класс SwishGLUClamped из BitNet v2.
     """
     def __init__(self, d_model, d_ffn):
         super().__init__()
-        # 🎯 LAYER FUSION: Объединяем w_gate и w_up в одну широкую матрицу
-        self.w_gate_up = BitLinear_a4_8(d_model, 2 * d_ffn)
-        self.w_down = BitLinear_a4_8(d_ffn, d_model, is_intermediate=True)
-        self.clipping_bounds = nn.Parameter(torch.ones(d_ffn) * 10.0)
+        self.ffn = SwishGLUClamped(d_model, d_ffn)
 
     def forward(self, x):
-        # Одно крупное матричное умножение на GPU
-        gate_up = self.w_gate_up(x)
-        
-        # Разрезаем выход на gate и up проекции
-        gate_raw, up = gate_up.chunk(2, dim=-1)
-        
-        # Применяем активацию
-        gate = LearnableClampSTE.apply(torch.square(torch.relu(gate_raw)), self.clipping_bounds)
-        
-        # Выходной проход
-        return self.w_down(gate * up)
+        return self.ffn(x)
 
 
 class BulbaTernaryTitanMoE(nn.Module):
@@ -84,17 +72,22 @@ class BulbaTernaryTitanMoE(nn.Module):
         nvtx_range_push("Bysel_MoE_Experts_Forward")
         B, T, D = x.shape
         
-        # 🎯 ДИНАМИЧЕСКИЙ ВЕС ШТРАФА БАЛАНСИРОВКИ (Dynamic MoE Scheduling):
-        # На старте (progress < 0.1) даем роутеру полную свободу выбора экспертов (aux_loss = 0.01)
-        # К середине обучения линейно повышаем вес до 0.08 для строгой балансировки
+        # Динамическое расписание штрафа роутера (MoE Scheduling):
+        # На старте (progress < 0.1) даем свободу, к середине повышаем до 0.08 для строгой балансировки
         if progress < 0.1:
             current_aux_weight = 0.01
         else:
             current_aux_weight = min(0.08, 0.01 + 0.175 * (progress - 0.1))
-            
-        h_bb = (self.shared_experts[0](x) + self.shared_experts[1](x)) / 2.0
-        x_enriched = x + torch.sigmoid(self.w_gate_blackboard(x)) * self.w_read_blackboard(h_bb)
         
+        # 1. SHARED EXPERTS
+        h_bb = (self.shared_experts[0](x) + self.shared_experts[1](x)) / 2.0
+        
+        # 2. BLACKBOARD MEMORY
+        gate_signal = torch.sigmoid(self.w_gate_blackboard(x))
+        read_signal = self.w_read_blackboard(h_bb)
+        x_enriched = x + gate_signal * read_signal
+        
+        # 3. ANTICIPATORY ROUTING
         router_logits = self.router(x_enriched.detach()).to(dtype=x_enriched.dtype)
         
         if self.training:
@@ -103,10 +96,12 @@ class BulbaTernaryTitanMoE(nn.Module):
         
         z_loss = z_loss_weight * torch.mean(torch.logsumexp(router_logits, dim=-1) ** 2)
         
+        # 4. TOP-K SELECTION
         routing_weights = F.softmax(router_logits, dim=-1)
         topk_weights, topk_indices = torch.topk(routing_weights, self.top_k, dim=-1)
         topk_weights = topk_weights / (topk_weights.sum(dim=-1, keepdim=True) + 1e-8)
         
+        # 5. ROUTED EXPERTS
         routed_output = torch.zeros_like(x_enriched)
         
         expert_masks = []
@@ -127,6 +122,7 @@ class BulbaTernaryTitanMoE(nn.Module):
                 weights = expert_weights_list[i][mask].unsqueeze(-1)
                 routed_output[mask] = out * weights
         
+        # 6. LOAD BALANCING LOSS (с учетом динамического веса)
         tokens_per_expert = torch.zeros(self.num_experts, device=x.device)
         for i in range(self.num_experts):
             tokens_per_expert[i] = expert_masks[i].sum().float()

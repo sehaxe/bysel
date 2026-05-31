@@ -1,6 +1,6 @@
 """
-⚙️ BYSEL LAYERS v4.0 - Autocast Safe, Fused GLU & Fused Native RMSNorm
-Оптимизирован для нативного ускорения на CUDA (RTX 5060 Ti Blackwell) и MPS.
+⚙️ BYSEL LAYERS v4.6 - Autocast Safe, SwishGLU, Fused RMSNorm & H-BitLinear (BitNet v2)
+Оптимизирован для нативного ускорения и подавления выбросов через преобразование Адамара.
 """
 
 import torch
@@ -14,6 +14,31 @@ def nvtx_range_push(name: str):
 def nvtx_range_pop():
     if torch.cuda.is_available():
         torch.cuda.nvtx.range_pop()
+
+
+def fast_walsh_hadamard_transform(x):
+    """
+    Быстрое преобразование Адамара (FWHT) для сглаживания выбросов в активациях.
+    Сложность O(d log d). Не имеет обучаемых параметров.
+    """
+    orig_shape = x.shape
+    D = orig_shape[-1]
+    x_flat = x.view(-1, D)
+    N_flat = x_flat.shape[0]
+    power_of_2 = 2 ** math.ceil(math.log2(D))
+    if D != power_of_2:
+        x_flat = torch.nn.functional.pad(x_flat, (0, power_of_2 - D))
+    h = 1
+    while h < power_of_2:
+        x_flat = x_flat.view(N_flat, -1, h * 2)
+        x1 = x_flat[..., :h]
+        x2 = x_flat[..., h:]
+        x_flat = torch.cat([x1 + x2, x1 - x2], dim=-1)
+        h *= 2
+    x_flat = x_flat.view(N_flat, power_of_2) / math.sqrt(power_of_2)
+    if D != power_of_2:
+        x_flat = x_flat[..., :D]
+    return x_flat.view(orig_shape)
 
 
 class RoundSTE(torch.autograd.Function):
@@ -33,16 +58,15 @@ class BitLinear_a4_8(nn.Linear):
         nn.init.normal_(self.weight, std=0.02)
 
     def forward(self, x):
-        # 🎯 ОПТИМИЗИРОВАННОЕ КВАНТОВАНИЕ ВЕСОВ:
+        # Квантование весов
         w = self.weight
-        # Избегаем создания лишних градиентных связей при расчете масштаба весов
         alpha = w.abs().mean().detach() + 1e-5
         
         w_scaled = w / alpha
         w_clipped = torch.clamp(w_scaled, -1, 1)
         w_quant = w_clipped + (RoundSTE.apply(w_clipped) - w_clipped)
 
-        # КВАНТОВАНИЕ АКТИВАЦИЙ (4-bit или 8-bit):
+        # Квантование активаций
         if not self.is_intermediate:
             beta = x.abs().mean(dim=-1, keepdim=True).detach() + 1e-5
             x_scaled = x * (2.6457 / beta)
@@ -65,6 +89,17 @@ class BitLinear_a4_8(nn.Linear):
             return out * (alpha * gamma / 127.0)
 
 
+class H_BitLinear(BitLinear_a4_8):
+    """
+    🎯 КЛАСС ИЗ СПЕЦИФИКАЦИИ BitNet v2 (MSR, 2025):
+    Выполняет быстрое онлайн-преобразование Адамара над входящими активациями
+    для устранения выбросов в каналах перед квантованием в 4/8-бит.
+    """
+    def forward(self, x):
+        x_rotated = fast_walsh_hadamard_transform(x)
+        return super().forward(x_rotated)
+
+
 class LearnableClampSTE(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, bounds):
@@ -84,43 +119,36 @@ class LearnableClampSTE(torch.autograd.Function):
 
 
 class RMSNorm(nn.Module):
-    """
-    Кастомный, аппаратно устойчивый класс нормализации RMSNorm.
-    Автоматически переключается на нативный Fused-кёрнел на поддерживаемых системах.
-    """
     def __init__(self, dim, eps=1e-6):
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x):
-        # 🎯 ОПТИМИЗАЦИЯ NATIVE FUSED RMSNORM (PyTorch 2.4+):
-        # Если версия PyTorch поддерживает нативный rms_norm, используем его C++/CUDA-кёрнел.
-        # Это исключает аллокацию промежуточных тензоров в Python, экономя VRAM и ускоряя шаг.
         if hasattr(torch.nn.functional, "rms_norm"):
             return torch.nn.functional.rms_norm(x, (x.shape[-1],), self.weight.to(x.dtype), self.eps)
-        
-        # Фолбек-расчет для старых версий PyTorch / CPU
         variance = x.pow(2).mean(-1, keepdim=True)
         return x * torch.rsqrt(variance + self.eps) * self.weight.to(x.dtype)
 
 
-class ReLU2GLUClamped(nn.Module):
+class SwishGLUClamped(nn.Module):
     """
-    Высокооптимизированный блок ReLU2GLU со слиянием проекций Gate-Up.
+    🎯 СПЕЦИФИКАЦИЯ SwiGLU ИЗ BitNet v2 & LLaMA:
+    Реализует Swish-gated Linear Unit со слиянием проекций Gate-Up
+    и динамическим зажиманием (LearnableClampSTE) для стабильности 1-битного обучения.
     """
     def __init__(self, d_model, d_ffn):
         super().__init__()
         self.w_gate_up = BitLinear_a4_8(d_model, 2 * d_ffn)
-        self.w_down = BitLinear_a4_8(d_ffn, d_model, is_intermediate=True)
+        # down-проекция в FFN заменена на H_BitLinear по спецификации BitNet v2
+        self.w_down = H_BitLinear(d_ffn, d_model, is_intermediate=True)
         self.clipping_bounds = nn.Parameter(torch.ones(d_ffn) * 10.0)
 
     def forward(self, x):
         gate_up = self.w_gate_up(x)
         gate_raw, up = gate_up.chunk(2, dim=-1)
         
-        gate = LearnableClampSTE.apply(
-            torch.square(torch.relu(gate_raw)), 
-            self.clipping_bounds
-        )
+        # Swish activation: x * sigmoid(x)
+        gate_swish = gate_raw * torch.sigmoid(gate_raw)
+        gate = LearnableClampSTE.apply(gate_swish, self.clipping_bounds)
         return self.w_down(gate * up)
