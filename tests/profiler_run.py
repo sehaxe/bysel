@@ -310,7 +310,12 @@ def main():
                     
     opt_engine = ByselOptimizerEngine(model, lr_muon=cfg.learning_rate_muon, lr_adamw=cfg.learning_rate_adamw)
     loss_engine = ByselLossEngine(cfg.vocab_size)
-    autopilot = ByselAutoPilot(opt_engine)
+    autopilot = ByselAutoPilot(
+        opt_engine,
+        max_lr_muon=cfg.learning_rate_muon,
+        max_lr_adamw=cfg.learning_rate_adamw,
+        target_wd=cfg.weight_decay
+    )
     
     # Запуск
     profiler = StableByselProfiler(device=device, steps=10)

@@ -1,8 +1,7 @@
 """
-📚 BYSEL PIPELINE v5.0 - Parallel Stream Interleaving Loader
+📚 BYSEL PIPELINE v5.1 - Parallel Stream Interleaving Loader
 Поддерживает динамическую сборку и параллельное перемешивание данных на лету в памяти.
 """
-
 import torch
 import os
 import json
@@ -28,7 +27,6 @@ try:
 except ImportError:
     HAS_PIL = False
 
-
 class PythonByteStreamer:
     def __init__(self, file_path, chunk_size, start_offset=0):
         with open(file_path, "rb") as f:
@@ -43,14 +41,12 @@ class PythonByteStreamer:
         end = min(self.position + self.chunk_size, len(self.data))
         chunk = list(self.data[start:end])
         self.position = end
-        
         if len(chunk) < self.chunk_size:
             chunk = chunk + [0] * (self.chunk_size - len(chunk))
         return chunk
-        
+
     def get_position(self):
         return self.position
-
 
 class ByselOmnivoreTextExtractor:
     def __init__(self, file_path, chunk_size, start_offset=0, img_size=(32, 32)):
@@ -59,42 +55,40 @@ class ByselOmnivoreTextExtractor:
         self.position = start_offset
         self.img_size = img_size
         self.raw_bytes = bytearray()
-        
+
         if file_path.endswith('.parquet'):
             if not HAS_PANDAS:
-                raise ImportError("\n❌ Для чтения .parquet установите: 'uv add pandas pyarrow'")
+                raise ImportError("❌ Для чтения .parquet установите: 'uv add pandas pyarrow'")
             df = pd.read_parquet(file_path)
             text_col = self._detect_text_column(df)
             full_text = "\n".join(text_col.astype(str).tolist())
             self.raw_bytes = bytearray(full_text.encode('utf-8'))
-            
         elif file_path.endswith('.jsonl'):
             with open(file_path, "r", encoding="utf-8") as f:
                 for line in f:
-                    if not line.strip():
-                        continue
+                    if not line.strip(): continue
                     try:
                         data = json.loads(line)
-                        
                         if "image" in data and HAS_PIL:
                             img_path = data["image"]
                             if not os.path.isabs(img_path):
                                 img_path = os.path.join(os.path.dirname(file_path), img_path)
-                                
                             if os.path.exists(img_path):
                                 img = Image.open(img_path).convert("RGB")
                                 img = img.resize(self.img_size)
                                 img_bytes = img.tobytes()
-                                
-                                self.raw_bytes.append(256)  # <IMG_START>
+                                self.raw_bytes.append(256) 
                                 self.raw_bytes.extend(img_bytes)
-                                self.raw_bytes.append(257)  # <IMG_END>
-                                
-                        text_val = self._recursive_extract_excluding_image(data)
-                        if text_val.strip():
-                            self.raw_bytes.extend(text_val.strip().encode('utf-8'))
-                            self.raw_bytes.extend(b"\n")
-                            
+                                self.raw_bytes.append(257) 
+                                text_val = self._recursive_extract_excluding_image(data)
+                                if text_val.strip():
+                                    self.raw_bytes.extend(text_val.strip().encode('utf-8'))
+                                self.raw_bytes.extend(b"\n")
+                        else:
+                            text_val = self._recursive_extract_excluding_image(data)
+                            if text_val.strip():
+                                self.raw_bytes.extend(text_val.strip().encode('utf-8'))
+                                self.raw_bytes.extend(b"\n")
                     except Exception:
                         continue
         else:
@@ -103,8 +97,7 @@ class ByselOmnivoreTextExtractor:
 
     def _recursive_extract_excluding_image(self, obj):
         if isinstance(obj, str):
-            if obj.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.bmp')):
-                return ""
+            if obj.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.bmp')): return ""
             return obj
         elif isinstance(obj, dict):
             return "\n".join([self._recursive_extract_excluding_image(v) for k, v in obj.items() if k != "image" and v])
@@ -115,11 +108,9 @@ class ByselOmnivoreTextExtractor:
 
     def _detect_text_column(self, df):
         for col in ["text", "content", "body", "code", "markdown", "raw_text"]:
-            if col in df.columns:
-                return df[col]
+            if col in df.columns: return df[col]
         for col in df.columns:
-            if df[col].dtype == object or str(df[col].dtype) == "string":
-                return df[col]
+            if df[col].dtype == object or str(df[col].dtype) == "string": return df[col]
         raise ValueError("Не удалось найти текстовую колонку в Parquet файле.")
 
     def next_chunk(self):
@@ -129,14 +120,12 @@ class ByselOmnivoreTextExtractor:
         end = min(self.position + self.chunk_size, len(self.raw_bytes))
         chunk = list(self.raw_bytes[start:end])
         self.position = end
-        
         if len(chunk) < self.chunk_size:
             chunk = chunk + [0] * (self.chunk_size - len(chunk))
         return chunk
 
     def get_position(self):
         return self.position
-
 
 class RustByteStreamDataset(IterableDataset):
     def __init__(self, data_path, chunk_size=8192, start_file_idx=0, start_byte_offset=0):
@@ -145,7 +134,7 @@ class RustByteStreamDataset(IterableDataset):
         self.start_file_idx = start_file_idx
         self.start_byte_offset = start_byte_offset
         self.files = []
-        
+
         if os.path.isdir(data_path):
             for root, _, filenames in os.walk(data_path):
                 for filename in filenames:
@@ -154,11 +143,9 @@ class RustByteStreamDataset(IterableDataset):
             self.files.sort()
         elif os.path.isfile(data_path):
             self.files.append(data_path)
-            
+
         if not self.files:
-            raise ValueError(
-                f"\n❌ [ОШИБКА ДАННЫХ]: В папке '{data_path}' не найдено подходящих файлов для обучения!\n"
-            )
+            raise ValueError(f"❌ [ОШИБКА ДАННЫХ]: В папке '{data_path}' не найдено подходящих файлов для обучения!\n")
 
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
@@ -172,81 +159,71 @@ class RustByteStreamDataset(IterableDataset):
         if not files_to_process:
             return
 
-        # Перемешиваем список файлов на старте итерации для разнообразия воркеров
         random.shuffle(files_to_process)
-
-        # 🎯 ТЕХНОЛОГИЯ ПАРАЛЛЕЛЬНОГО СМЕШИВАНИЯ ПОТОКОВ (Interleaving):
-        # Открываем файловые стримеры для ВСЕХ файлов одновременно.
         active_streamers = []
         for file_path in files_to_process:
             offset = self.start_byte_offset if (self.start_file_idx < len(self.files) and file_path == self.files[self.start_file_idx]) else 0
-            
-            use_rust_streamer = (
-                not file_path.endswith(('.parquet', '.jsonl')) 
-                and HAS_RUST_IO
-            )
+            use_rust_streamer = (not file_path.endswith(('.parquet', '.jsonl')) and HAS_RUST_IO)
             
             if use_rust_streamer:
                 streamer = bysel_rust_io.ByteStreamer(file_path, self.chunk_size, offset)
             else:
                 streamer = ByselOmnivoreTextExtractor(file_path, self.chunk_size, offset)
-                
             active_streamers.append((streamer, file_path))
 
         shuffle_buffer = []
         buffer_size = 50
-        
-        # Цикл работает до тех пор, пока есть активные (непустые) файлы
+
         while active_streamers:
-            # Случайно выбираем один из активных стримеров (перемешивание на лету)
             idx = random.randint(0, len(active_streamers) - 1)
             streamer, file_path = active_streamers[idx]
-            
             chunk = streamer.next_chunk()
             if chunk is None:
-                # Файл полностью прочитан — закрываем его стример
                 active_streamers.pop(idx)
                 continue
-                
-            # Определяем глобальный индекс файла для сохранения чекпоинта
+
             pseudo_file_idx = self.files.index(file_path) if file_path in self.files else 0
             byte_offset = streamer.get_position()
-            
             shuffle_buffer.append((chunk, pseudo_file_idx, byte_offset))
-            
-            # Постепенно выдаем чанки через буфер случайного перемешивания
+
             if len(shuffle_buffer) >= buffer_size:
                 random.shuffle(shuffle_buffer)
                 yield shuffle_buffer.pop(0)
-                
-        # Выдаем остатки буфера после прочтения всех файлов
+
         random.shuffle(shuffle_buffer)
         for item in shuffle_buffer:
             yield item
-
 
 def collate_bysel_batch(batch):
     chunks = [item[0] for item in batch]
     file_indices = [item[1] for item in batch]
     byte_offsets = [item[2] for item in batch]
-    batch_tensors = torch.stack([torch.tensor(c, dtype=torch.int32) for c in chunks])
+    
+    tensors = []
+    for c in chunks:
+        # 🎯 ИСПРАВЛЕНИЕ ОШИБКИ: PyO3 0.28 возвращает bytes. 
+        # Используем torch.frombuffer для мгновенного zero-copy парсинга.
+        if isinstance(c, (bytes, bytearray)):
+            tensors.append(torch.frombuffer(bytearray(c), dtype=torch.uint8).to(torch.int32))
+        else:
+            tensors.append(torch.tensor(list(c), dtype=torch.int32))
+            
+    batch_tensors = torch.stack(tensors)
     return batch_tensors, file_indices[-1], byte_offsets[-1]
-
 
 def get_bysel_dataloader(data_path, chunk_size, batch_size, start_file_idx=0, start_byte_offset=0, num_workers=None):
     dataset = RustByteStreamDataset(data_path, chunk_size, start_file_idx, start_byte_offset)
     use_pin = torch.cuda.is_available()
-    
     if num_workers is None:
         if platform.system() == "Linux" and torch.cuda.is_available():
             num_workers = min(4, os.cpu_count() or 1)
         else:
             num_workers = 0
-            
+
     return DataLoader(
-        dataset, 
-        batch_size=batch_size, 
-        num_workers=num_workers, 
+        dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
         pin_memory=use_pin,
         collate_fn=collate_bysel_batch
     )
