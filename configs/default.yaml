@@ -5,6 +5,27 @@ global:
   precision: "bf16"
 
 profiles:
+  chyzh:
+    model:
+      d_model: 128          # Микро-ширина (2 головы по 64)
+      n_layers: 6           # 6 слоев (4 слоя GDN-2 + 2 слоя MLA)
+      n_heads: 2            
+      expert_hidden: 256    # 2 * d_model
+      num_experts: 4        # 4 эксперта MoE (динамический выбор top-2)
+      top_k: 2
+      vocab_size: 259
+    data:
+      data_path: "data_train"
+      chunk_size: 2048      # Рабочий контекст 2К
+      batch_size: 4        # Огромный батч 64 для максимального параллелизма GPU
+    training:
+      max_steps: "auto"     # Автопланировщик Шиншиллы
+      warmup_steps: "auto"
+      min_lr_ratio: 0.1
+      learning_rate_muon: 0.0008
+      learning_rate_adamw: 0.00008
+      weight_decay: 0.1
+
   shpak:
     model:
       d_model: 384          

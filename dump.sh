@@ -8,11 +8,20 @@ echo "📄 Выходной файл: $OUTPUT_FILE"
 
 echo "# BULBA1-LIGHTNING PROJECT DUMP" >> "$OUTPUT_FILE"
 echo "**Date:** $(date)" >> "$OUTPUT_FILE"
-echo "---\n" >> "$OUTPUT_FILE"
+echo -e "---\n" >> "$OUTPUT_FILE"
+
+# Максимальный размер файла для дампа (500 КБ)
+MAX_SIZE_BYTES=512000
 
 dump_file() {
     local file_path="$1"
     local file_size=$(wc -c < "$file_path" | tr -d ' ')
+    
+    # Защитная проверка: пропускаем слишком тяжелые файлы (датасеты, логи и т.д.)
+    if [ "$file_size" -gt "$MAX_SIZE_BYTES" ]; then
+        echo "⚠️ Пропущен (превышает 500 KB): $file_path ($file_size bytes)"
+        return
+    fi
     
     echo "================================================================" >> "$OUTPUT_FILE"
     echo "📁 FILE: $file_path ($file_size bytes)" >> "$OUTPUT_FILE"
@@ -32,6 +41,7 @@ dump_file() {
     cat "$file_path" >> "$OUTPUT_FILE"
     echo '```' >> "$OUTPUT_FILE"
     echo -e "\n\n" >> "$OUTPUT_FILE"
+    echo "✅ Добавлен: $file_path"
 }
 
 find . -type f \
@@ -46,6 +56,7 @@ find . -type f \
     -not -path "*/node_modules/*" \
     -not -path "*/.pytest_cache/*" \
     -not -path "*/.mypy_cache/*" \
+    -not -path "*/data_train/*" \
     -not -name "*.pyc" \
     -not -name "*.so" \
     -not -name "*.dylib" \
@@ -59,7 +70,6 @@ find . -type f \
     \( -name "*.py" -o -name "*.rs" -o -name "*.yaml" -o -name "*.toml" -o -name "*.md" -o -name "*.txt" \) | sort | while read -r file; do
     
     dump_file "$file"
-    echo "✅ Добавлен: $file"
 done
 
 FINAL_SIZE=$(wc -c < "$OUTPUT_FILE" | tr -d ' ')
