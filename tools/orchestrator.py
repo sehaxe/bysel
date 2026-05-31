@@ -114,9 +114,29 @@ def serve(
 
 
 def bot():
-    load_env()
-    if "TELEGRAM_BOT_TOKEN" not in os.environ:
-        typer.echo(typer.style("❌ ERROR: Define TELEGRAM_BOT_TOKEN in .env before running the bot!", fg=typer.colors.RED, bold=True))
+    """Запуск Telegram бота с автонастройкой."""
+    from telegram_bot.setup_wizard import run_setup_wizard
+    
+    # Запускаем мастер настройки если нужно
+    env_vars = run_setup_wizard()
+    
+    # Устанавливаем переменные в окружение
+    for key, value in env_vars.items():
+        os.environ[key] = value
+    
+    # Проверяем токен
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    if not token:
+        typer.echo(typer.style("❌ TELEGRAM_BOT_TOKEN не установлен!", fg=typer.colors.RED, bold=True))
+        typer.echo("   Запустите повторно для настройки.")
         raise typer.Exit(code=1)
-    # 🎯 ИСПРАВЛЕН КРИТИЧЕСКИЙ БАГ ПУТИ К ФАЙЛУ БОТА:
-    subprocess.run([sys.executable, "telegram_bot/telegram_bot.py"])
+    
+    # Уведомляем о запуске
+    admin_ids = os.environ.get("TELEGRAM_ADMIN_IDS", "")
+    typer.echo(typer.style("🤖 Запуск Бусел-бота...", fg=typer.colors.CYAN, bold=True))
+    typer.echo(f"   Админы: {admin_ids}")
+    typer.echo(f"   API: {os.environ.get('INFERENCE_API_URL', 'http://127.0.0.1:8000')}")
+    typer.echo()
+    
+    # Запускаем бота
+    subprocess.run([sys.executable, "-m", "telegram_bot.bot"])

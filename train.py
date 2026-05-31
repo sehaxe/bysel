@@ -1,6 +1,6 @@
 """
 ╔═══════════════════════════════════════════════════════════════════════════╗
-║ BYSEL TRAINING ENGINE v5.1 - Progress-Driven Auto-Chinchilla Curriculum  ║
+║ BYSEL TRAINING ENGINE v5.2 - Telegram-Controlled Cybernetic Curriculum   ║
 ║                                                                           ║
 ║ 🎯 KEY OPTIMIZATIONS:                                                     ║
 ║   • Sequence Length Warmup (Curriculum: 1024 -> 2048 -> 4096)             ║
@@ -8,6 +8,7 @@
 ║   • Dynamic Chinchilla max_steps auto-calculator                          ║
 ║   • ByselAutoPilot v6.0 (Predictive Gradient Dampening & Adaptive AGC)    ║
 ║   • CUDA-only Gradient Checkpointing (safeguards MPS RNG state bug)       ║
+║   • Telegram Bot Integration (Remote Pause/Stop/Resume via state_manager) ║
 ╚═══════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -32,6 +33,22 @@ from model.backbone import ByselModel
 from training.optimizer import ByselOptimizerEngine
 from training.autopilot import ByselAutoPilot
 from training.recipe import ByselLossEngine
+
+# ═══════════════════════════════════════════════════════════════
+# 🤖 TELEGRAM BOT STATE MANAGER INTEGRATION
+# ═══════════════════════════════════════════════════════════════
+try:
+    from telegram_bot.state_manager import (
+        get_state, update_state, set_status, is_alive
+    )
+    HAS_STATE_MANAGER = True
+except ImportError:
+    HAS_STATE_MANAGER = False
+    # Fallback no-op функции если state_manager не найден
+    def get_state(): return {"status": "idle"}
+    def update_state(**kwargs): pass
+    def set_status(status): pass
+    def is_alive(timeout=60.0): return True
 
 
 class ByselConfig:
@@ -99,19 +116,43 @@ def build_targets(byte_batch, input_length, stride=4):
     return targets, mtp_targets
 
 
+def save_bot_stopped_checkpoint(model, patcher, step, file_idx, byte_offset, profile, device, reason="bot_stopped"):
+    """Сохраняет checkpoint когда обучение остановлено через Telegram-бота."""
+    os.makedirs("checkpoints", exist_ok=True)
+    path = f"checkpoints/bysel_{profile}_{reason}.pt"
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'patcher_state_dict': patcher.state_dict(),
+        'step': step,
+        'file_idx': file_idx,
+        'byte_offset': byte_offset,
+        'reason': reason,
+    }, path)
+    print(f"\n💾 [{reason.upper()}] Checkpoint saved: {path}")
+    return path
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Bysel v5.1 - Production Training")
+    parser = argparse.ArgumentParser(description="Bysel v5.2 - Production Training with Telegram Control")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint for resuming")
     parser.add_argument("--profile", type=str, default="shpak", help="Profile name from default.yaml")
     parser.add_argument("--no-compile", action="store_true", help="Disable torch.compile")
     parser.add_argument("--no-checkpointing", action="store_true", help="Disable gradient checkpointing")
+    parser.add_argument("--no-bot", action="store_true", help="Disable Telegram bot state integration")
     args = parser.parse_args()
 
     print("╔═══════════════════════════════════════════════════════════════╗")
-    print("║  BYSEL TRAINING ENGINE v5.1 - Adaptive Curriculum Active      ║")
+    print("║  BYSEL TRAINING ENGINE v5.2 - Telegram Control Active         ║")
     print("╚═══════════════════════════════════════════════════════════════╝")
     
     enforce_stability()
+    
+    # Флаг активности интеграции с ботом
+    bot_integration_active = HAS_STATE_MANAGER and not args.no_bot
+    if bot_integration_active:
+        print("🤖 [TELEGRAM BOT] State manager integration: ACTIVE")
+    else:
+        print("🤖 [TELEGRAM BOT] State manager integration: DISABLED")
     
     with open("configs/default.yaml", "r") as f:
         full_config = yaml.safe_load(f)
@@ -188,6 +229,22 @@ def main():
             start_file_idx = checkpoint.get('file_idx', 0)
             start_byte_offset = checkpoint.get('byte_offset', 0)
 
+    # ═══════════════════════════════════════════════════════════════
+    # 🤖 INITIALIZE STATE MANAGER (Telegram Bot)
+    # ═══════════════════════════════════════════════════════════════
+    if bot_integration_active:
+        update_state(
+            status="running",
+            current_step=start_step,
+            max_steps=cfg.max_steps,
+            profile=args.profile,
+            started_at=time.time(),
+            pid=os.getpid(),
+            total_pause_time=0.0,
+            paused_at=None
+        )
+        print(f"🤖 [BOT] State initialized: running @ step {start_step}/{cfg.max_steps}")
+
     # === DATALOADER PREPARATION ===
     print("\n📚 Initializing Curriculum DataLoader...")
     # Обучение по расписанию длины контекста (Sequence Length Warmup):
@@ -216,6 +273,14 @@ def main():
             'file_idx': global_current_file_idx,
             'byte_offset': global_current_byte_offset,
         }, "checkpoints/latest_crash_backup.pt")
+        
+        if bot_integration_active:
+            set_status("stopped")
+            update_state(
+                status="stopped",
+                current_step=global_current_step,
+                last_signal="SIGINT"
+            )
         sys.exit(0)
 
     signal.signal(signal.SIGINT, save_emergency_checkpoint)
@@ -234,11 +299,15 @@ def main():
         try:
             current_batch = next(dataloader_iter)
         except StopIteration:
+            if bot_integration_active:
+                set_status("finished")
             return
     else:
         try:
             current_batch = next(dataloader_iter)
         except StopIteration:
+            if bot_integration_active:
+                set_status("finished")
             return
 
     print("\n🔥 Training started.")
@@ -253,6 +322,39 @@ def main():
         global_current_step = step
         
         progress = float(step) / float(cfg.max_steps)
+        
+        # ═══════════════════════════════════════════════════════════════
+        # 🤖 TELEGRAM BOT STATE CONTROL LOOP
+        # ═══════════════════════════════════════════════════════════════
+        if bot_integration_active:
+            # Обновляем heartbeat и текущий шаг для бота
+            update_state(current_step=step)
+            
+            # 🔴 ПРОВЕРКА ОСТАНОВКИ (через команду /stop в Telegram)
+            current_state = get_state()
+            if current_state.get("status") == "stopped":
+                print("\n🛑 [BOT STOP] Received stop command from Telegram!")
+                print("💾 Saving emergency checkpoint...")
+                save_bot_stopped_checkpoint(
+                    model, patcher, step,
+                    global_current_file_idx, global_current_byte_offset,
+                    args.profile, device, reason="bot_stopped"
+                )
+                update_state(status="stopped", current_step=step)
+                sys.exit(0)
+            
+            # ⏸️ ПРОВЕРКА ПАУЗЫ (через команду /pause в Telegram)
+            pause_logged = False
+            while get_state().get("status") == "paused":
+                if not pause_logged:
+                    print(f"\n⏸️  [BOT PAUSE] Training paused at step {step}/{cfg.max_steps}")
+                    print("   Waiting for /resume command from Telegram...")
+                    pause_logged = True
+                time.sleep(1.0)
+            
+            if pause_logged:
+                print(f"▶️  [BOT RESUME] Training resumed at step {step}/{cfg.max_steps}")
+        # ═══════════════════════════════════════════════════════════════
         
         # 🎯 ДИНАМИЧЕСКИЙ CURRICULUM ДЛИНЫ КОНТЕКСТА:
         new_chunk_size = current_chunk_size
@@ -418,6 +520,15 @@ def main():
     print(f"   Total time:   {total_time/3600:.2f} h")
     print(f"   Total tokens: {total_tokens:,}")
     print(f"   Avg speed:    {avg_speed:.1f} tokens/sec")
+    
+    # 🤖 Уведомляем бота о завершении
+    if bot_integration_active:
+        set_status("finished")
+        update_state(
+            status="finished",
+            current_step=global_current_step,
+            completed_at=time.time()
+        )
     
     os.makedirs("checkpoints", exist_ok=True)
     final_path = f"checkpoints/bysel_{args.profile}_FINAL.pt"
