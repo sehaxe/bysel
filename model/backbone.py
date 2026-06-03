@@ -194,17 +194,18 @@ class buselModel(nn.Module):
         total_aux_loss = 0.0
 
         for i, layer in enumerate(self.layers):
-            x = self.m_residuals[i](x, streams)
+            mixed = self.m_residuals[i](x, streams)
 
-            if self.training and self.use_gradient_checkpointing and x.device.type in ["cuda", "mps"]:
+            if self.training and self.use_gradient_checkpointing and mixed.device.type in ["cuda", "mps"]:
                 layer_out, aux_loss = torch.utils.checkpoint.checkpoint(
-                    layer, x, progress, use_reentrant=False, determinism_check="none"
+                    layer, mixed, progress, use_reentrant=False, determinism_check="none"
                 )
             else:
-                layer_out, aux_loss = layer(x, progress=progress)
+                layer_out, aux_loss = layer(mixed, progress=progress)
 
+            x = mixed + layer_out
             total_aux_loss += aux_loss
-            streams = list(streams[1:]) + [layer_out]
+            streams = list(streams[1:]) + [x]
 
         final_hidden = self.final_norm(x)
         mtp_outputs = self.mtp_pipeline(final_hidden, next_token_ids)

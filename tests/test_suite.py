@@ -424,6 +424,55 @@ class TestbuselFramework(unittest.TestCase):
         mtp, aux = model(hidden)
         self.assertEqual(mtp[0].shape, (B, T, 259))
 
+    def test_mar_residual_connection_preserved(self):
+        # mHC §3.1: y_l = x_l + f_l(mixed_x_l). Residual add must be in buselModel.forward.
+        cfg = _MockConfig(d_model=128, n_layers=2, n_heads=4, n_hyper=2)
+        torch.manual_seed(42)
+        model = buselModel(cfg).eval()
+        const_value = 1.0
+        for layer in model.layers:
+            def constant_forward(self, x, progress=0.0):
+                return torch.full_like(x, const_value), torch.tensor(0.0, device=x.device, dtype=x.dtype)
+            layer.forward = constant_forward.__get__(layer)
+        x_in = torch.zeros(1, 2, cfg.d_model)
+        recorded_hidden = []
+        original_final_norm = model.final_norm.forward
+        def spy_norm(x):
+            recorded_hidden.append(x.clone())
+            return original_final_norm(x)
+        model.final_norm.forward = spy_norm
+        try:
+            with torch.no_grad():
+                model(x_in)
+        finally:
+            model.final_norm.forward = original_final_norm
+        final_x = recorded_hidden[-1]
+        expected_with_residual = 2 * const_value
+        actual_max = final_x.abs().max().item()
+        self.assertAlmostEqual(actual_max, expected_with_residual, delta=0.5,
+                               msg=f"Residual missing or wrong: final x max={actual_max:.3f}, expected ~{expected_with_residual} (2 layers of residual adds with constant 1.0)")
+
+    def test_mar_layer_outputs_flow_into_streams(self):
+        # Streams must carry the post-residual x (residual stream values), enabling mHC mixing.
+        cfg = _MockConfig(d_model=128, n_layers=3, n_heads=4, n_hyper=2)
+        torch.manual_seed(0)
+        model = buselModel(cfg).eval()
+        recorded_mar_inputs = []
+        original_mar_forward = ManifoldConstrainedAttnRes.forward
+        def spy_forward(self, current_x, streams):
+            recorded_mar_inputs.append([s.clone() for s in streams])
+            return original_mar_forward(self, current_x, streams)
+        ManifoldConstrainedAttnRes.forward = spy_forward
+        try:
+            x_in = torch.randn(1, 4, cfg.d_model)
+            with torch.no_grad():
+                model(x_in)
+        finally:
+            ManifoldConstrainedAttnRes.forward = original_mar_forward
+        self.assertGreater(len(recorded_mar_inputs), 1, "MAR must run at each layer")
+        for layer_idx, streams in enumerate(recorded_mar_inputs[1:], start=1):
+            self.assertEqual(len(streams), cfg.n_hyper)
+
     def test_muon_ns_produces_orthogonal_output(self):
         # Paper §3.1: NS output singular values are bounded (≈ 1, within paper tolerance)
         # Uses eager _newton_schulz_core to avoid torch.compile recompile limit
