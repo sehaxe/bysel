@@ -1,5 +1,5 @@
 """
-📚 BYSEL PIPELINE v5.1 - Parallel Stream Interleaving Loader
+📚 busel PIPELINE v5.1 - Parallel Stream Interleaving Loader
 Поддерживает динамическую сборку и параллельное перемешивание данных на лету в памяти.
 """
 import torch
@@ -10,7 +10,7 @@ import platform
 from torch.utils.data import IterableDataset, DataLoader
 
 try:
-    import bysel_rust_io
+    import busel
     HAS_RUST_IO = True
 except ImportError:
     HAS_RUST_IO = False
@@ -48,7 +48,7 @@ class PythonByteStreamer:
     def get_position(self):
         return self.position
 
-class ByselOmnivoreTextExtractor:
+class buselOmnivoreTextExtractor:
     def __init__(self, file_path, chunk_size, start_offset=0, img_size=(32, 32)):
         self.file_path = file_path
         self.chunk_size = chunk_size
@@ -166,9 +166,9 @@ class RustByteStreamDataset(IterableDataset):
             use_rust_streamer = (not file_path.endswith(('.parquet', '.jsonl')) and HAS_RUST_IO)
             
             if use_rust_streamer:
-                streamer = bysel_rust_io.ByteStreamer(file_path, self.chunk_size, offset)
+                streamer = busel.ByteStreamer(file_path, self.chunk_size, offset)
             else:
-                streamer = ByselOmnivoreTextExtractor(file_path, self.chunk_size, offset)
+                streamer = buselOmnivoreTextExtractor(file_path, self.chunk_size, offset)
             active_streamers.append((streamer, file_path))
 
         shuffle_buffer = []
@@ -194,7 +194,7 @@ class RustByteStreamDataset(IterableDataset):
         for item in shuffle_buffer:
             yield item
 
-def collate_bysel_batch(batch):
+def collate_busel_batch(batch):
     chunks = [item[0] for item in batch]
     file_indices = [item[1] for item in batch]
     byte_offsets = [item[2] for item in batch]
@@ -211,7 +211,7 @@ def collate_bysel_batch(batch):
     batch_tensors = torch.stack(tensors)
     return batch_tensors, file_indices[-1], byte_offsets[-1]
 
-def get_bysel_dataloader(data_path, chunk_size, batch_size, start_file_idx=0, start_byte_offset=0, num_workers=None):
+def get_busel_dataloader(data_path, chunk_size, batch_size, start_file_idx=0, start_byte_offset=0, num_workers=None):
     dataset = RustByteStreamDataset(data_path, chunk_size, start_file_idx, start_byte_offset)
     use_pin = torch.cuda.is_available()
     if num_workers is None:
@@ -225,5 +225,5 @@ def get_bysel_dataloader(data_path, chunk_size, batch_size, start_file_idx=0, st
         batch_size=batch_size,
         num_workers=num_workers,
         pin_memory=use_pin,
-        collate_fn=collate_bysel_batch
+        collate_fn=collate_busel_batch
     )

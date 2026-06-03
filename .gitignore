@@ -24,6 +24,9 @@ dist/
 
 # --- Rust ---
 target/
+*.so
+*.dylib
+*.dll
 
 # --- Starlight docs (site/) ---
 site/dist/

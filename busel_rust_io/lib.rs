@@ -114,7 +114,7 @@ fn init_thread_pool(num_threads: usize) -> PyResult<()> {
     if num_threads > 0 {
         let _ = rayon::ThreadPoolBuilder::new()
             .num_threads(num_threads)
-            .thread_name(|i| format!("bysel-io-{}", i))
+            .thread_name(|i| format!("busel-io-{}", i))
             .build_global();
     }
     Ok(())
@@ -128,7 +128,7 @@ fn get_cpu_count() -> usize {
 }
 
 #[pymodule]
-fn bysel_rust_io(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn busel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ByteStreamer>()?;
     m.add_function(wrap_pyfunction!(init_thread_pool, m)?)?;
     m.add_function(wrap_pyfunction!(get_cpu_count, m)?)?;

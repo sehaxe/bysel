@@ -1,5 +1,5 @@
 """
-📈 BYSEL MODERN GOOGLE-STYLE PLOTTER v3.0
+📈 busel MODERN GOOGLE-STYLE PLOTTER v3.0
 Генерирует минималистичные графики в стиле Google Cloud / Vertex AI.
 """
 

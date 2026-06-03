@@ -24,7 +24,7 @@ class StridedFastBLTPatcher(nn.Module):
         self.norm = RMSNorm(d_model)
 
     def forward(self, byte_ids):
-        nvtx_range_push("Bysel_Byte_Patching_Forward")
+        nvtx_range_push("busel_Byte_Patching_Forward")
         byte_ids_device = byte_ids.to(self.embed_weight.device)
         x = F.embedding(byte_ids_device, self.embed_weight)
         

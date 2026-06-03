@@ -1,5 +1,5 @@
 """
-⚙️ BYSEL ROUTING v4.0 - Stable MoE & MoD
+⚙️ busel ROUTING v4.0 - Stable MoE & MoD
 Интегрирован SwishGLUClamped в эксперты MoE и down-проекции переведены на H-BitLinear.
 """
 
@@ -17,7 +17,7 @@ class MoDSequenceRouter(nn.Module):
         nn.init.normal_(self.router.weight, mean=0.0, std=0.02)
 
     def forward(self, x):
-        nvtx_range_push("Bysel_MoD_Routing_Forward")
+        nvtx_range_push("busel_MoD_Routing_Forward")
         B, T, C = x.shape
         k = int(T * self.capacity_factor)
         logits = self.router(x).squeeze(-1)
@@ -69,7 +69,7 @@ class BulbaTernaryTitanMoE(nn.Module):
         self.w_read_blackboard = BitLinear_a4_8(d_model, d_model)
 
     def forward(self, x, progress=0.0, aux_loss_weight=0.05, z_loss_weight=0.001):
-        nvtx_range_push("Bysel_MoE_Experts_Forward")
+        nvtx_range_push("busel_MoE_Experts_Forward")
         B, T, D = x.shape
         
         # Динамическое расписание штрафа роутера (MoE Scheduling):

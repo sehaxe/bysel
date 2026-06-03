@@ -1,5 +1,5 @@
 """
-⚙️ BYSEL LAYERS v4.7 - Autocast Safe, SwishGLU, Fused RMSNorm & H-BitLinear (BitNet v2)
+⚙️ busel LAYERS v4.7 - Autocast Safe, SwishGLU, Fused RMSNorm & H-BitLinear (BitNet v2)
 """
 import torch
 import torch.nn as nn

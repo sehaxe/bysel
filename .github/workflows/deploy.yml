@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main, master ] # 🎯 Поддержка обеих веток (и main, и master)
     paths:
-      - 'docs/**' # Запускать сборку только при изменении документации
+      - 'site/**' # Запускать сборку только при изменении документации
   workflow_dispatch: # 🎯 Позволяет запускать сборку вручную одной кнопкой на GitHub!
 
 permissions:
@@ -24,13 +24,13 @@ jobs:
       - name: Install Bun
         uses: oven-sh/setup-bun@v1
       - name: Install dependencies
-        run: cd docs && bun install
+        run: cd site && bun install
       - name: Build docs
-        run: cd docs && bun run build
+        run: cd site && bun run build
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: docs/dist
+          path: site/dist
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4

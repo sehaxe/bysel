@@ -1,5 +1,5 @@
 """
-⚙️ BYSEL LOSS ENGINE v4.0 (MTP-4 STABILIZED)
+⚙️ busel LOSS ENGINE v4.0 (MTP-4 STABILIZED)
 Вычисляет многоголовый причинный лосс MTP-4 с затухающим взвешиванием.
 """
 
@@ -14,7 +14,7 @@ except ImportError:
     HAS_LIGER = False
 
 
-class ByselLossEngine:
+class buselLossEngine:
     def __init__(self, vocab_size=259):
         self.vocab_size = vocab_size
 

@@ -1,5 +1,5 @@
 """
-📊 BYSEL ULTRA-STABLE PROFILER v2.0
+📊 busel ULTRA-STABLE PROFILER v2.0
 Оптимизирован для MPS (Apple Silicon) и CUDA.
 Избегает использования нестабильного torch.profiler, вызывающего зависания на macOS.
 Замеряет абсолютно все фазы шага обучения (Forward, Backward, Optimizer, Noise).
@@ -15,15 +15,15 @@ import torch.nn as nn
 # Гарантируем корректность импортов из корня проекта
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from data.pipeline import get_bysel_dataloader
+from data.pipeline import get_busel_dataloader
 from model.patching import StridedFastBLTPatcher
-from model.backbone import ByselModel
-from training.optimizer import ByselOptimizerEngine
-from training.autopilot import ByselAutoPilot
-from training.recipe import ByselLossEngine
+from model.backbone import buselModel
+from training.optimizer import buselOptimizerEngine
+from training.autopilot import buselAutoPilot
+from training.recipe import buselLossEngine
 
 
-class StableByselProfiler:
+class StablebuselProfiler:
     def __init__(self, device="mps", steps=10):
         self.device = device
         self.steps = steps
@@ -182,7 +182,7 @@ class StableByselProfiler:
         import numpy as np
         
         print("\n" + "="*80)
-        print("📊 BYSEL FAST STABLE PROFILER REPORT".center(80))
+        print("📊 busel FAST STABLE PROFILER REPORT".center(80))
         print("="*80)
         
         print(f"\n🧠 ПАРАМЕТРЫ МОДЕЛИ:")
@@ -290,15 +290,15 @@ def main():
         os.makedirs(cfg.data_path, exist_ok=True)
         created_dir = True
         with open(os.path.join(cfg.data_path, test_file), "w", encoding="utf-8") as f:
-            f.write("Слава беларускаму аисту! Профайлер Bysel. Тестовые данные для замера. " * 300)
+            f.write("Слава беларускаму аисту! Профайлер busel. Тестовые данные для замера. " * 300)
             
     # Загружаем DataLoader
-    dataloader = get_bysel_dataloader(cfg.data_path, chunk_size=cfg.chunk_size, batch_size=cfg.batch_size)
+    dataloader = get_busel_dataloader(cfg.data_path, chunk_size=cfg.chunk_size, batch_size=cfg.batch_size)
     dataloader_iter = iter(dataloader)
     
     # Инициализируем объекты
     patcher = StridedFastBLTPatcher(d_model=cfg.d_model).to(device)
-    model = ByselModel(cfg).to(device)
+    model = buselModel(cfg).to(device)
     
     # Фикс типов для RMSNorm
     target_dtype = torch.bfloat16 if device == "cuda" else torch.float16
@@ -308,9 +308,9 @@ def main():
                 if hasattr(module, "weight") and module.weight is not None:
                     module.weight.data = module.weight.data.to(target_dtype)
                     
-    opt_engine = ByselOptimizerEngine(model, lr_muon=cfg.learning_rate_muon, lr_adamw=cfg.learning_rate_adamw)
-    loss_engine = ByselLossEngine(cfg.vocab_size)
-    autopilot = ByselAutoPilot(
+    opt_engine = buselOptimizerEngine(model, lr_muon=cfg.learning_rate_muon, lr_adamw=cfg.learning_rate_adamw)
+    loss_engine = buselLossEngine(cfg.vocab_size)
+    autopilot = buselAutoPilot(
         opt_engine,
         max_lr_muon=cfg.learning_rate_muon,
         max_lr_adamw=cfg.learning_rate_adamw,
@@ -318,7 +318,7 @@ def main():
     )
     
     # Запуск
-    profiler = StableByselProfiler(device=device, steps=10)
+    profiler = StablebuselProfiler(device=device, steps=10)
     total_params = sum(p.numel() for p in model.parameters())
     
     try:

@@ -1,0 +1,65 @@
+# training/ — Optimizer, AutoPilot, Loss
+
+**Scope:** Hybrid Muon+AdamW, predictive AutoPilot v6.0, MTP-4 weighted loss engine.
+
+## STRUCTURE
+```
+training/
+├── optimizer.py    # Muon (Newton-Schulz ×5), buselOptimizerEngine (hybrid Muon+AdamW)
+├── autopilot.py    # buselAutoPilot v6.0 — predictive dampening, adaptive AGC, dynamic WD
+└── recipe.py       # buselLossEngine — pretrain (MTP-4 weighted), SFT, KTO losses
+```
+
+## WHERE TO LOOK
+| Want to... | Edit | Notes |
+|---|---|---|
+| Change optimizer | `optimizer.py` | Muon only on 2D `proj` params w/o `router` in name |
+| Tune LR schedule | `autopilot.py` → `update_parameters` | Cosine decay w/ warmup, spike recovery (35% LR × 15 steps) |
+| Change grad clipping | `autopilot.py` → `before_step` | First 50 steps: max_norm=2.0 free; later: rolling_avg × 1.5 |
+| Add loss term | `recipe.py` | `compute_pretrain_loss` already handles MTP-4 weighted sum |
+| Change dampening | `autopilot.py` line ~50 | 3σ rule on last 15 grad norms (predictive) |
+| Switch to FlashMuon | `optimizer.py` line ~9 | Auto-uses `flash_muon.Muon` if `torch.cuda.is_available()` |
+
+## KEY CLASSES
+| Symbol | Type | Location | Role |
+|---|---|---|---|
+| `_newton_schulz_core` | function | optimizer.py | Quintic NS iteration, 5 steps, transposed for tall matrices |
+| `_compiled_newton_schulz` | function | optimizer.py | `@torch.compile(reduce-overhead)` on Linux+CUDA; eager fallback |
+| `Muon` | Optimizer | optimizer.py | Manual momentum + NS orthogonalize, scale=`0.2*sqrt(max(A,B))` |
+| `buselOptimizerEngine` | class | optimizer.py | Splits params: 2D+`proj`+!`router`→Muon; rest→AdamW |
+| `buselAutoPilot` | class | autopilot.py | Wraps engine; tracks loss/grad history; recovery countdown |
+| `buselLossEngine` | class | recipe.py | Liger-CE on CUDA; vanilla F.cross_entropy elsewhere; MTP weights [0.5, 0.25, 0.125] |
+
+## CONVENTIONS
+- **Param routing rule:** `param.ndim == 2 and "router" not in name and "proj" in name` → Muon
+- **Muon momentum:** 0.95; NS steps: 5; weight_decay: dynamic (set by AutoPilot)
+- **AdamW weight_decay:** 0.01 (fixed); lr_adamw is 10× smaller than lr_muon
+- **Dampening threshold:** `mean(history[:-1]) + 3σ` over last 15 grad norms
+- **Spike detection:** `current_loss > 1.35 × rolling_avg(loss[:-1])` over 15 steps
+- **Recovery:** LR scaled to 35% for 15 steps after spike; noise scale ×1.5
+- **LR cosine:** `min_lr_ratio + (1-min_lr_ratio) × 0.5 × (1+cos(π·progress))` after warmup
+- **Weight decay curve:** `wd_factor = 0.1` warmup, `0.1 + 0.9·progress` mid, `0.5` last 10%
+- **Liger kernel:** Only if `HAS_LIGER` and CUDA; `liger_cross_entropy` for CE/MTP
+
+## ANTI-PATTERNS
+- **NEVER** apply Muon to 1D params (norms, biases) — `buselOptimizerEngine` filters them
+- **NEVER** apply Muon to anything with `router` in name — routers are noise-sensitive
+- **NEVER** change `momentum=0.95` without testing — Muon spec is brittle
+- **NEVER** disable predictive dampening in first 50 steps — gradients must be free then
+- **NEVER** set `noise_scale > 0` after progress > 0.90 — final phase is noise-free
+- **NEVER** add `@torch.compile` to the whole `step()` — only to inner NS function
+- **NEVER** use `F.cross_entropy` on CUDA when Liger is available — 2-3× slower
+- **NEVER** skip `stabilization_factor *= lr_factor` — it's multiplicative w/ cosine schedule
+- **NEVER** call `state['momentum_buffer'].to(p.dtype)` — kept in `bf16`/`fp16`/`fp32` per device
+- **NEVER** save KTO labels as float — must be `0` or `1` (integer label)
+
+## NOTES
+- **Muon scale formula:** `0.2 * sqrt(max(A, B))` per Muon paper (Keller Jordan)
+- **NS coefficients:** `(3.4445, -4.7750, 2.0315)` — optimal for 5-step quintic iteration
+- **Auto-Batcher hook:** `train.py` uses `grad_accum_steps` separately; engine is per-step
+- **Spike recovery hardcoded:** 35% LR × 15 steps (no config knob yet)
+- **`inject_noise`:** Gaussian `noise_scale × grad_norm` per param (only if `grad_norm > 1e-5`)
+- **Loss API contract:** `compute_pretrain_loss(logits_t1, targets, [logits_t2,t3,t4], [t2,t3,t4])` — MTP logits are Optional, weight is index-based
+- **MTP target alignment:** Defined in `train.py:build_targets` — T1=stride-shifted byte, T2/T3/T4 at offsets [2,3,4] in byte space
+- **`progress` propagation:** `train.py` passes `step/max_steps` to layer.forward → MoE.forward
+- **Liger fallback:** `importlib.util.find_spec("liger_kernel")` or just try-except — auto-fallback to vanilla

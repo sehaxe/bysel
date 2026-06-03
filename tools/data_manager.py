@@ -6,6 +6,14 @@ import shutil
 import urllib.request
 import typer
 
+# Ограничиваем потоки pyarrow для предотвращения GIL-конфликтов на выходе
+try:
+    import pyarrow
+    pyarrow.set_cpu_count(1)
+    pyarrow.set_io_thread_count(1)  # <- Исправленный метод
+except ImportError:
+    pass
+
 DATA_DIR = "data_train"
 IMAGES_DIR = os.path.join(DATA_DIR, "images")
 JSONL_PATH = os.path.join(DATA_DIR, "dataset.jsonl")
@@ -93,6 +101,11 @@ def _download_vision(limit: int, dataset_name: str):
                 
     typer.echo(typer.style(f"✅ Successfully saved {count} samples to '{JSONL_PATH}'", fg=typer.colors.GREEN))
 
+    # Избегаем GIL-конфликтов при очистке потоков PyArrow
+    del dataset
+    import gc
+    gc.collect()
+
 
 def _download_text(limit: int, source: str):
     from datasets import load_dataset
@@ -146,6 +159,11 @@ def _download_text(limit: int, source: str):
             except Exception:
                 continue
     typer.echo(typer.style(f"✅ Successfully saved {count} texts to '{output_file}'", fg=typer.colors.GREEN))
+
+    # Избегаем GIL-конфликтов при очистке потоков PyArrow
+    del dataset
+    import gc
+    gc.collect()
 
 
 def _download_sft(limit: int, source: str):
@@ -215,6 +233,11 @@ def _download_sft(limit: int, source: str):
             except Exception:
                 continue
     typer.echo(typer.style(f"✅ SFT dataset ({count} instructions) successfully saved to '{output_file}'", fg=typer.colors.GREEN))
+
+    # Избегаем GIL-конфликтов при очистке потоков PyArrow
+    del dataset
+    import gc
+    gc.collect()
 
 
 # Регистрируем команды в Typer
