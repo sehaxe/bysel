@@ -1,30 +1,99 @@
 global:
-  project_name: "bysel"
+  project_name: "busel"
   device: "cuda"
   seed: 42
   precision: "bf16"
 
 profiles:
-  chyzh:
+  validation:
     model:
-      d_model: 128          # Микро-ширина (2 головы по 64)
-      n_layers: 6           # 6 слоев (4 слоя GDN-2 + 2 слоя MLA)
-      n_heads: 2            
-      expert_hidden: 256    # 2 * d_model
-      num_experts: 4        # 4 эксперта MoE (динамический выбор top-2)
+      d_model: 128
+      n_layers: 3
+      n_heads: 4
+      expert_hidden: 256
+      num_experts: 2
       top_k: 2
       vocab_size: 259
     data:
       data_path: "data_train"
-      chunk_size: 2048      # Рабочий контекст 2К
-      batch_size: 4        # Огромный батч 64 для максимального параллелизма GPU
+      chunk_size: 256
+      batch_size: 256
     training:
-      max_steps: "auto"     # Автопланировщик Шиншиллы
+      max_steps: 200
+      warmup_steps: 10
+      min_lr_ratio: 0.1
+      learning_rate_muon: 0.003
+      learning_rate_adamw: 0.0003
+      weight_decay: 0.1
+      grad_accum_steps: 1
+      checkpoint_interval: 200
+
+  micro_test:
+    model:
+      d_model: 128           # Small but enough to learn patterns
+      n_layers: 3            # 3 layers for better learning
+      n_heads: 4
+      expert_hidden: 256
+      num_experts: 2         # 2 experts for speed
+      top_k: 2
+      vocab_size: 259
+    data:
+      data_path: "data_train"
+      chunk_size: 256       # Small context for speed
+      batch_size: 4096       # Large batch for fast convergence
+    training:
+      max_steps: 2000        # Enough steps to get coherent output
+      warmup_steps: 100
+      min_lr_ratio: 0.1
+      learning_rate_muon: 0.003
+      learning_rate_adamw: 0.0003
+      weight_decay: 0.1
+      grad_accum_steps: 1
+      checkpoint_interval: 500  # Save every 500 steps
+
+  quick_test:
+    model:
+      d_model: 128
+      n_layers: 4
+      n_heads: 4
+      expert_hidden: 256
+      num_experts: 2
+      top_k: 2
+      vocab_size: 259
+    data:
+      data_path: "data_train"
+      chunk_size: 256
+      batch_size: 2048
+    training:
+      max_steps: 500
+      warmup_steps: 20
+      min_lr_ratio: 0.1
+      learning_rate_muon: 0.002
+      learning_rate_adamw: 0.0002
+      weight_decay: 0.1
+      grad_accum_steps: 1
+
+  chyzh:
+    model:
+      d_model: 192          # Снижено до 192 (даст емкость ровно ~10M параметров)
+      n_layers: 6           # 6 слоев
+      n_heads: 3            # 3 головы (192 / 3 = 64)
+      expert_hidden: 384    # 2 * d_model
+      num_experts: 4        # 4 эксперта MoE
+      top_k: 2
+      vocab_size: 259
+    data:
+      data_path: "data_train"
+      chunk_size: 512      # Рабочий контекст 2К
+      batch_size: 1400       # Возвращаем батч 512 (Auto-Batcher сам уменьшит его до 128 на контексте 2К)
+    training:
+      max_steps: 1500       # Ограничиваем до 1500 шагов вместо "auto"
       warmup_steps: "auto"
       min_lr_ratio: 0.1
       learning_rate_muon: 0.0008
       learning_rate_adamw: 0.00008
       weight_decay: 0.1
+      grad_accum_steps: 1   # Накопление не требуется, батч 512 пройдет легко
 
   shpak:
     model:
@@ -38,14 +107,15 @@ profiles:
     data:
       data_path: "data_train"
       chunk_size: 4096      
-      batch_size: 4        
+      batch_size: 128       # Стартовый батч для Shpak (52M параметров)
     training:
-      max_steps: "auto"        # Автокалькулятор Шиншиллы
-      warmup_steps: "auto"     # Автоматически (5% от max_steps)
-      min_lr_ratio: 0.1        # Минимальный LR на финише — 10% от пикового
+      max_steps: "auto"        
+      warmup_steps: "auto"     
+      min_lr_ratio: 0.1        
       learning_rate_muon: 0.0006
       learning_rate_adamw: 0.00006
       weight_decay: 0.1
+      grad_accum_steps: 1   # Auto-Batcher адаптирует батч сам
 
   zubr:
     model:
@@ -59,11 +129,12 @@ profiles:
     data:
       data_path: "data_train"
       chunk_size: 16384     
-      batch_size: 2         
+      batch_size: 32        # Стартовый батч для Zubr (120M параметров)
     training:
-      max_steps: "auto"        # Автокалькулятор Шиншиллы
-      warmup_steps: "auto"     # Автоматически (5% от max_steps)
-      min_lr_ratio: 0.1        # Минимальный LR на финише — 10% от пикового
+      max_steps: "auto"        
+      warmup_steps: "auto"     
+      min_lr_ratio: 0.1        
       learning_rate_muon: 0.0006
       learning_rate_adamw: 0.00006
       weight_decay: 0.1
+      grad_accum_steps: 1   # Auto-Batcher адаптирует батч сам
