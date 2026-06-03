@@ -1,53 +1,113 @@
 """
 ╔═══════════════════════════════════════════════════════════════════════════╗
-║ BYSEL BACKBONE v5.3 - Mathematically Exact mAR (DeepSeek mHC + Kimi)      ║
+║ busel BACKBONE v5.4 - mAR: mHC (DeepSeek) + AttnRes (Kimi) — exact      ║
+║                                                                           ║
+║ Manifold-Constrained Attention Residuals combines:                        ║
+║   • mHC:  n_hyper parallel streams, mixing H ∈ Birkhoff polytope         ║
+║           via Sinkhorn-Knopp (restores identity-mapping property)         ║
+║   • AttnRes: input-dependent H computed via multi-query attention         ║
+║           (q from current input, k from each stream)                      ║
 ╚═══════════════════════════════════════════════════════════════════════════╝
 """
+import math
 import torch
 import torch.nn as nn
 from model.layers import BitLinear_a4_8, RMSNorm, nvtx_range_push, nvtx_range_pop
 from model.attention import BulbaGDN2SeRoPEBlock, MultiHeadLatentAttention
 from model.routing import MoDSequenceRouter, BulbaTernaryTitanMoE
 
+
 class ManifoldConstrainedAttnRes(nn.Module):
+    """Manifold-Constrained Attention Residuals (mAR).
+
+    Combines Kimi Attention Residuals (input-dependent attention over layer
+    outputs) with DeepSeek mHC (Sinkhorn-Knopp projection of the mixing matrix
+    onto the Birkhoff polytope of doubly-stochastic matrices).
+
+    Maintains n_hyper parallel residual streams. At each call:
+      1. Compute n queries from current input, n keys from the n streams
+         (multi-query attention — AttnRes spirit).
+      2. Build raw H_logits ∈ R^{n×n} per (B, T) via q·k + fixed identity
+         bias (+5.0 on diagonal, mHC's identity-mapping property at init).
+      3. Project to Birkhoff polytope via Sinkhorn-Knopp (mHC constraint).
+      4. Mix the n streams with H, return the mean over streams.
+
+    Args:
+        d_model: residual stream width (must be divisible by n_hyper).
+        n_hyper: number of parallel hyper-connection streams (default 2).
+        n_sinkhorn_iters: Sinkhorn-Knopp iterations (paper uses 3-20).
     """
-    mAR: Скрещение Kimi Attention Residuals и DeepSeek mHC.
-    Вычисляет чистую взвешенную сумму по всем предшествующим неаккумулированным выходам v_i.
-    """
-    def __init__(self, d_model):
+
+    def __init__(self, d_model: int, n_hyper: int = 2, n_sinkhorn_iters: int = 3):
         super().__init__()
-        self.proj = nn.Linear(d_model, 1, bias=False)
+        if d_model % n_hyper != 0:
+            raise ValueError(f"d_model ({d_model}) must be divisible by n_hyper ({n_hyper})")
+        self.d_model = d_model
+        self.n_hyper = n_hyper
+        self.n_sinkhorn_iters = n_sinkhorn_iters
+        self.d_head = d_model // n_hyper
+
+        self.q_proj = BitLinear_a4_8(d_model, d_model)
+        self.k_proj = BitLinear_a4_8(d_model, self.d_head)
+
+        identity_bias = torch.zeros(n_hyper, n_hyper)
+        for i in range(n_hyper):
+            identity_bias[i, i] = 5.0
+        self.register_buffer("identity_bias", identity_bias)
+
+        self.temperature = nn.Parameter(torch.ones(1))
+
         self.norm = RMSNorm(d_model)
-        nn.init.zeros_(self.proj.weight)
 
-    def forward(self, current_x, all_prev_outputs):
-        if len(all_prev_outputs) <= 1:
-            return all_prev_outputs[0]
+    def sinkhorn_knopp(self, M: torch.Tensor, n_iters: int | None = None) -> torch.Tensor:
+        """Project M onto the Birkhoff polytope (doubly-stochastic matrices).
 
-        logits_list = []
-        proj_weight = self.proj.weight.squeeze()
-        for prev_x in all_prev_outputs:
-            K_part = self.norm(prev_x)
-            logit_part = torch.einsum('d, b t d -> b t', proj_weight, K_part)
-            logits_list.append(logit_part)
-            
-        M = torch.stack(logits_list, dim=0) # [L, B, T]
-        M_stable = M - M.max(dim=0, keepdim=True)[0]
-        
-        # 🎯 ИСПРАВЛЕНИЕ: Убираем некорректную нормализацию по токенам (dim=-1).
-        # Добавляем штраф за Attention Sink (линейный bias для ранних слоев).
-        layer_bias = torch.linspace(0.5, 0.0, M.shape[0], device=M.device).view(-1, 1, 1)
-        M_stable = M_stable + layer_bias
-        
-        M = torch.exp(M_stable)
-        M = M / (M.sum(dim=0, keepdim=True) + 1e-8) # Строгий Simplex по слоям (dim=0)
+        M: [..., n, n] real-valued matrix.
+        Returns: [..., n, n] doubly-stochastic matrix (rows AND cols sum to 1).
+        """
+        if n_iters is None:
+            n_iters = self.n_sinkhorn_iters
 
-        h = torch.zeros_like(current_x)
-        for l in range(len(all_prev_outputs)):
-            h = h + M[l].unsqueeze(-1) * all_prev_outputs[l]
-        return h
+        M = M * self.temperature
+        M = torch.exp(M - M.max(dim=-1, keepdim=True)[0].max(dim=-2, keepdim=True)[0])
 
-class ByselDecoderLayer(nn.Module):
+        for _ in range(n_iters):
+            M = M / (M.sum(dim=-1, keepdim=True) + 1e-8)
+            M = M / (M.sum(dim=-2, keepdim=True) + 1e-8)
+        return M
+
+    def forward(self, current_x: torch.Tensor, streams: tuple[torch.Tensor, ...]) -> torch.Tensor:
+        """Mix n_hyper streams using input-dependent doubly-stochastic H.
+
+        Args:
+            current_x: [B, T, d_model] — input to current layer.
+            streams: tuple of n_hyper tensors, each [B, T, d_model].
+
+        Returns:
+            y: [B, T, d_model] — mixed stream (mean over n_hyper).
+        """
+        n = self.n_hyper
+        if len(streams) != n:
+            raise ValueError(f"Expected {n} streams, got {len(streams)}")
+        B, T, _ = current_x.shape
+
+        q = self.q_proj(current_x).view(B, T, n, self.d_head)
+
+        ks = [self.k_proj(s) for s in streams]
+        k_stack = torch.stack(ks, dim=2)
+
+        H_logits = torch.einsum('btqd,btkd->btqk', q, k_stack) / math.sqrt(self.d_head)
+        H_logits = H_logits + self.identity_bias
+
+        H = self.sinkhorn_knopp(H_logits)
+
+        streams_stack = torch.stack(streams, dim=2)
+        y_streams = torch.einsum('btij,btjd->btid', H, streams_stack)
+        y = y_streams.mean(dim=2)
+        return self.norm(y)
+
+
+class buselDecoderLayer(nn.Module):
     def __init__(self, d_model, n_heads, expert_hidden, num_experts, is_global=False, capacity_factor=1.0):
         super().__init__()
         self.mod_router = MoDSequenceRouter(d_model, capacity_factor=capacity_factor)
@@ -64,23 +124,21 @@ class ByselDecoderLayer(nn.Module):
             attn_out = self.attn(self.attn_norm(x))
             moe_out, aux_loss = self.moe(self.moe_norm(attn_out), progress=progress)
             return moe_out, aux_loss
-
         B, T, C = x.shape
         mask, logits = self.mod_router(x)
         k = int(T * self.mod_router.capacity_factor)
         if k == 0:
             return torch.zeros_like(x), torch.tensor(0.0, device=x.device, dtype=x.dtype)
-
         active_tokens = x[mask].view(B, k, C)
         attn_out = self.attn(self.attn_norm(active_tokens))
         moe_out, aux_loss = self.moe(self.moe_norm(attn_out), progress=progress)
         gated_out = moe_out * torch.sigmoid(logits[mask]).view(B, k, 1)
-        
         out = torch.zeros_like(x)
         out[mask] = gated_out.view(-1, C)
         return out, aux_loss
 
-class ByselMTP4Pipeline(nn.Module):
+
+class buselMTP4Pipeline(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.embed_weight = nn.Parameter(torch.randn(config.vocab_size, config.d_model) * 0.02)
@@ -94,7 +152,6 @@ class ByselMTP4Pipeline(nn.Module):
         logits_t1 = self.heads[0](main_hidden_states)
         if next_token_ids is None or any(t is None for t in next_token_ids):
             return logits_t1, None, None, None
-
         h_detached = main_hidden_states.detach()
         combined_t2 = self.projections[0](h_detached) + self._embed_lookup(next_token_ids[0])
         logits_t2 = self.heads[1](combined_t2)
@@ -104,45 +161,52 @@ class ByselMTP4Pipeline(nn.Module):
         logits_t4 = self.heads[3](combined_t4)
         return logits_t1, logits_t2, logits_t3, logits_t4
 
-class ByselModel(nn.Module):
+
+class buselModel(nn.Module):
     def __init__(self, config):
         super().__init__()
+        self.n_hyper = int(getattr(config, "n_hyper", 2))
+
         capacity = 1.0
         self.layers = nn.ModuleList()
         for l in range(config.n_layers):
             is_global = (l + 1) % 4 == 0
-            self.layers.append(ByselDecoderLayer(
-                config.d_model, config.n_heads, config.expert_hidden, 
+            self.layers.append(buselDecoderLayer(
+                config.d_model, config.n_heads, config.expert_hidden,
                 config.num_experts, is_global=is_global, capacity_factor=capacity
             ))
-        
-        self.m_residuals = nn.ModuleList([ManifoldConstrainedAttnRes(config.d_model) for _ in range(config.n_layers)])
+
+        self.m_residuals = nn.ModuleList([
+            ManifoldConstrainedAttnRes(config.d_model, n_hyper=self.n_hyper)
+            for _ in range(config.n_layers)
+        ])
+
         self.final_norm = RMSNorm(config.d_model)
-        self.mtp_pipeline = ByselMTP4Pipeline(config)
+        self.mtp_pipeline = buselMTP4Pipeline(config)
         self.use_gradient_checkpointing = False
 
     def enable_gradient_checkpointing(self): self.use_gradient_checkpointing = True
     def disable_gradient_checkpointing(self): self.use_gradient_checkpointing = False
 
     def forward(self, x, next_token_ids=None, progress=0.0):
-        nvtx_range_push("ByselModel_Forward")
-        prev_outputs = [x]
+        nvtx_range_push("buselModel_Forward")
+        streams = [x] * self.n_hyper
         total_aux_loss = 0.0
 
         for i, layer in enumerate(self.layers):
-            m_res = self.m_residuals[i]
-            h_i = m_res(x, prev_outputs)
+            x = self.m_residuals[i](x, streams)
 
             if self.training and self.use_gradient_checkpointing and x.device.type in ["cuda", "mps"]:
-                layer_out, aux_loss = torch.utils.checkpoint.checkpoint(layer, h_i, progress, use_reentrant=False)
+                layer_out, aux_loss = torch.utils.checkpoint.checkpoint(
+                    layer, x, progress, use_reentrant=False, determinism_check="none"
+                )
             else:
-                layer_out, aux_loss = layer(h_i, progress=progress)
-                
-            total_aux_loss += aux_loss
-            prev_outputs.append(layer_out)
-            x = h_i
+                layer_out, aux_loss = layer(x, progress=progress)
 
-        final_hidden = self.final_norm(self.m_residuals[-1](x, prev_outputs))
+            total_aux_loss += aux_loss
+            streams = list(streams[1:]) + [layer_out]
+
+        final_hidden = self.final_norm(x)
         mtp_outputs = self.mtp_pipeline(final_hidden, next_token_ids)
         nvtx_range_pop()
         return mtp_outputs, total_aux_loss
