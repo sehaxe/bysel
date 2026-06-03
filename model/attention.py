@@ -1,5 +1,5 @@
 """
-💡 BYSEL ATTENTION v5.2 - Gated DeltaNet-2 & MLA (Stabilized Broadcasting)
+💡 busel ATTENTION v5.2 - Gated DeltaNet-2 & MLA (Stabilized Broadcasting)
 Интегрирован раздельный закон стирания и записи GDN-2,
 когерентный логарифмический распад alpha (Eq. 12) с выверенным бродкастом.
 """
@@ -8,12 +8,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from model.layers import BitLinear_a4_8, H_BitLinear, RMSNorm, nvtx_range_push, nvtx_range_pop
+from busel_registry import register
 
+# 🎯 Нативный импорт официального ядра GDN-2 из flash-linear-attention
 try:
-    from fla.layers.gated_deltanet import GatedDeltaNet
-    HAS_FLA = True
+    from fla.ops.gdn2 import chunk_gdn2
+    HAS_FLA_GDN2 = True
 except ImportError:
-    HAS_FLA = False
+    HAS_FLA_GDN2 = False
 
 
 @torch.jit.script
@@ -59,6 +61,7 @@ def stable_gdn2_recurrent_jit(q, k, v, b, w, alpha):
     return out.reshape(B, T, -1)
 
 
+@register("attention", "gdn2")
 class BulbaGDN2SeRoPEBlock(nn.Module):
     def __init__(self, d_model=1536, n_heads=12):
         super().__init__()
@@ -84,11 +87,10 @@ class BulbaGDN2SeRoPEBlock(nn.Module):
         # Обучаемый вектор масштаба логарифмического затухания, инициализируемый отрицательным числом
         self.alpha_a = nn.Parameter(torch.ones(n_heads, 1) * -3.0)
         
-        if HAS_FLA and torch.cuda.is_available():
-            self.gdn2_kernel = GatedDeltaNet(d_model=d_model, n_heads=n_heads, elementwise_affine=True)
+        # Активируем Triton-ядро только если оно есть в библиотеке и мы на GPU с поддержкой CUDA
+        if HAS_FLA_GDN2 and torch.cuda.is_available():
             self.use_fla = True
         else:
-            self.gdn2_kernel = None
             self.use_fla = False
             
         # Низкоранговый выходной гейт (Output Gating — Формула 10)
@@ -115,7 +117,7 @@ class BulbaGDN2SeRoPEBlock(nn.Module):
         return q_out, k_out
 
     def forward(self, x):
-        nvtx_range_push("Bysel_GDN2_SeRoPE_Forward")
+        nvtx_range_push("busel_GDN2_SeRoPE_Forward")
         B, T, C = x.shape
         
         # 1. Линейные проекции и каузальные свертки
@@ -147,13 +149,19 @@ class BulbaGDN2SeRoPEBlock(nn.Module):
         alpha = torch.exp(g_t)
         
         if self.use_fla:
-            q_flat = q.view(B, T, -1)
-            k_flat = k.view(B, T, -1)
-            v_flat = v.view(B, T, -1)
-            b_flat = b.view(B, T, -1)
-            w_flat = w.view(B, T, -1)
-            alpha_flat = alpha.view(B, T, -1)
-            out = self.gdn2_kernel(q_flat, k_flat, v_flat, b_flat, w_flat, alpha_flat)
+            # 🚀 СВЕРХБЫСТРЫЙ И КОРРЕКТНЫЙ TRITON-ИНФЕРЕНС GDN-2 (PR #920):
+            # Передаем q, k, v, логарифмический распад g_t, гейт очистки b и гейт записи w.
+            # По умолчанию в FLA используется формат [B, T, H, D]
+            out, _ = chunk_gdn2(
+                q, 
+                k, 
+                v, 
+                g_t,        # Передаем логарифмический распад g_t
+                b,          # Передаем гейт стирания b
+                w,          # Передаем гейт записи w
+                scale=1.0 / (self.d_k ** 0.5)
+            )
+            out = out.reshape(B, T, -1)
         else:
             out = stable_gdn2_recurrent_jit(q, k, v, b, w, alpha)
             
@@ -166,6 +174,7 @@ class BulbaGDN2SeRoPEBlock(nn.Module):
         return res
 
 
+@register("attention", "mla")
 class MultiHeadLatentAttention(nn.Module):
     def __init__(self, d_model=1536, n_heads=12, d_c=128):
         super().__init__()
@@ -188,7 +197,7 @@ class MultiHeadLatentAttention(nn.Module):
         self.o_proj = H_BitLinear(n_heads * self.d_v, d_model)
 
     def forward(self, x):
-        nvtx_range_push("Bysel_MLA_Forward")
+        nvtx_range_push("busel_MLA_Forward")
         B, T, C = x.shape
         kv_latent = self.kv_norm(self.kv_compress(x))
         k = self.k_decompress(kv_latent).view(B, T, self.n_heads, self.d_v).transpose(1, 2)

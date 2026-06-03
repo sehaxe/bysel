@@ -1,9 +1,10 @@
 """
-⚙️ BYSEL OPTIMIZER - Official Muon Specification (FP32 Newton-Schulz) & AdamW
+⚙️ busel OPTIMIZER - Official Muon Specification (FP32 Newton-Schulz) & AdamW
 """
 import torch
 import math
 import platform
+from busel_registry import register
 
 try:
     from flash_muon import Muon as FlashMuon
@@ -42,6 +43,7 @@ else:
     def _compiled_newton_schulz(X, steps=5):
         return _newton_schulz_core(X, steps)
 
+@register("optimizer", "muon")
 class Muon(torch.optim.Optimizer):
     def __init__(self, params, lr=1e-3, weight_decay=0.1, momentum=0.95, ns_steps=5):
         defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum, ns_steps=ns_steps)
@@ -78,7 +80,8 @@ class Muon(torch.optim.Optimizer):
     def hybrid_newton_schulz(self, M, steps=10):
         return _newton_schulz_core(M, steps)
 
-class ByselOptimizerEngine:
+@register("optimizer", "hybrid_muon_adamw")
+class buselOptimizerEngine:
     def __init__(self, model, lr_muon=0.002, lr_adamw=0.0002):
         muon_params = []
         adamw_params = []
