@@ -1,0 +1,105 @@
+---
+title: Busel AI
+description: Sovereign 1.58-bit LLM — architecture, training, and wiki.
+template: splash
+hero:
+  tagline: Sovereign, token-free 1.58-bit LLM with mAR residuals, hybrid GDN-2/MLA attention, and MTP-4. Designed for high-performance training on consumer hardware.
+  actions:
+    - text: Get Started
+      link: /busel-ai/guides/getting-started/
+      icon: right-arrow
+    - text: Architecture
+      link: /busel-ai/architecture/overview/
+      icon: open-book
+      variant: primary
+    - text: View on GitHub
+      link: https://github.com/sehaxe/busel-ai
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+## What is Busel?
+
+Busel (Бусел, from Belarusian *бусел* — stork) is a from-scratch
+implementation of a 1.58-bit LLM. It is small enough to read in an
+afternoon (~2 300 LoC of Python + ~140 LoC of Rust), runs on a single
+RTX 5060 Ti or Apple Silicon Mac, and includes a custom architecture that
+combines several recent research ideas in one place.
+
+<CardGrid stencil>
+  <Card title="1.58-bit weights" icon="pencil">
+    Every linear in the backbone quantises to `{-1, 0, +1}`. The Shpak
+    profile (52.8 M params) ships as an **11 MB** checkpoint. Inference
+    becomes pure additions on CPU.
+  </Card>
+  <Card title="mAR residuals" icon="document">
+    Replace the classical `y = x + f(x)` with an input-dependent,
+    doubly-stochastic mixture of the last `n_hyper` layer outputs,
+    projected onto the **Birkhoff polytope** via Sinkhorn-Knopp.
+    Combines [Kimi AttnRes](https://arxiv.org/abs/2603.15031) and
+    [DeepSeek mHC](https://arxiv.org/abs/2512.24880).
+  </Card>
+  <Card title="3:1 GDN-2 / MLA" icon="setting">
+    75 % of layers are linear (GDN-2, O(1) cache), 25 % are MLA
+    (latent KV, `d_c=128`). A 128 K-token context fits in ~98 MB of cache.
+  </Card>
+  <Card title="Byte-level (no BPE)" icon="star">
+    Vocabulary of 259 tokens. The same byte stream carries text, code,
+    JSON, images, and PDFs. The Gated FastBLT patcher compresses
+    4 bytes → 1 patch.
+  </Card>
+  <Card title="Hybrid Muon + AdamW" icon="rocket">
+    2D projection weights go through the Muon Newton-Schulz
+    orthogonaliser; the rest goes through AdamW. The AutoPilot v6.0
+    handles spike recovery, adaptive clipping, and dynamic weight decay.
+  </Card>
+  <Card title="Plug-in registry" icon="puzzle">
+    Adding a new attention or optimizer? Decorate it with
+    `@register("kind", "name")` and the rest of the codebase picks it up
+    automatically. No central switch statement to edit.
+  </Card>
+</CardGrid>
+
+## Where to next?
+
+<CardGrid>
+  <LinkCard
+    title="📘 Architecture deep dive"
+    description="Read the design philosophy and the 'why' behind every choice."
+    href="/busel-ai/architecture/overview/"
+  />
+  <LinkCard
+    title="🔥 How a training run works"
+    description="End-to-end walkthrough of one training step, from bytes to logits."
+    href="/busel-ai/training/training-guide/"
+  />
+  <LinkCard
+    title="⚙️ API Reference"
+    description="Every public class, every config knob, with line references."
+    href="/busel-ai/reference/model/"
+  />
+  <LinkCard
+    title="🚀 Performance & torch.compile"
+    description="How to get the most out of your GPU. Modes, fallbacks, gotchas."
+    href="/busel-ai/performance/compile-modes/"
+  />
+</CardGrid>
+
+## Quick numbers
+
+| Profile  | Total params | Active | Bit-size | Context |
+|----------|-------------:|-------:|---------:|--------:|
+| chyzh    | ~10 M        | ~5 M   | —        | 512 B   |
+| **shpak**| **52.8 M**   | 25 M   | **11 MB**| 4096 B  |
+| zubr     | 120 M        | 35 M   | 30 MB    | 16 384 B|
+
+| Mode (RTX 5060 Ti, val profile) | tok/s |
+|---------------------------------|------:|
+| Eager                           | 189 576 |
+| `torch.compile` (default)       | **578 255** (3.05×) |
+
+See [Quick tour](/busel-ai/guides/quick-tour/) for the full numbers and
+the [Performance section](/busel-ai/performance/compile-modes/) for the
+`torch.compile` gotchas.

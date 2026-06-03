@@ -1,149 +1,319 @@
-# Bysel (Бусел) v5.1: Sovereign Any-Scale 1-bit Omni-LLM
+# Busel (Бусел) — Sovereign Any-Scale 1-bit LLM
 
-*(произносится как **[бу́сэл]**, от бел. бусел — аист)*
+> *Pronounced **[ˈbusɛl]** — from Belarusian **бусел** (stork).*
+>
+> A token-free, 1.58-bit, hybrid linear-attention LLM with **mAR** residuals,
+> MoE, byte-level patching, and MTP-4. Trains and infers on consumer hardware
+> (RTX 5060 Ti 16 GB / Apple Silicon Mac) without any external tokenizer.
 
-Bysel (Бусел) — сверхэффективная, безтокенная Any-to-Text 1-битная LLM с гибридным линейным вниманием, межслойными связями на многообразиях (mAR) и смесью экспертов, разработанная для обучения и инференса на потребительском оборудовании (RTX 5060 Ti 16GB / Apple Silicon Mac) [4].
-
-Проект спроектирован по строжайшим стандартам отказоустойчивости и оптимизации вычислений, минимизируя накладные расходы на диспетчеризацию ядер GPU и пропускную способность видеопамяти.
-
----
-
-## 🚀 Архитектурная революция
-
-### 1. Тернарные веса (BitNet 1.58b / v2)
-Линейные слои бэкбона используют 1.58-битную тернарную математику квантования весов в диапазон `{-1.0, 0.0, 1.0}` с динамическим поканальным масштабированием активаций (INT4/INT8) [1.1.7]. Обучение весов происходит в скрытом вещественном пространстве (Master Weights) через градиентный шаг Straight-Through Estimator (STE) [1.1.6, 1.2.4]. На этапе инференса вещественная математика полностью заменяется быстрыми целочисленными сложениями и вычитаниями, убирая необходимость в дорогих операциях умножения на CPU [1.1.7, 1.3.1].
-
-### 2. Безтокенный побайтовый гейт-патчер (Gated FastBLT)
-Модель полностью отказывается от классических BPE-словарей, исключая «налог на эмбеддинги» (в традиционных SLM до 40% весов тратится вхолостую на хранение словаря) [1.1.2]. 
-*   **Словарь:** Всего 259 токенов (256 байт спектра UTF-8 + спецсимволы мультимодальности).
-*   **Гейтирование:** Сырые байты пропускаются через нелинейный сигмоидальный вентиль ($\text{GLU}$), который на раннем этапе обучается фильтровать синтаксический шум (лишние пробелы, разметку) и выделять семантическое ядро слов. Это существенно снижает «налог на правописание» (spelling tax) [1.1.2].
-*   **Сжатие:** Сверточный слой с шагом `stride = 4` сжимает каждые 4 байта в 1 латентный патч-токен, обеспечивая ту же плотность контекста, что и у BPE, но со 100% устойчивостью к опечаткам и незнакомым словам.
-
-### 3. mAR (Manifold Constrained Attention Residuals) — Межслойные Birkhoff-связи
-Вместо классического сложения в остаточных связях слоев ($y = x + f(x)$), которое приводит к избыточности и дублированию функций слоев (representational collapse), в Bysel внедрена уникальная технология **mAR**, объединяющая [Kimi Attention Residuals](https://arxiv.org/abs/2603.15031) с [DeepSeek mHC](https://arxiv.org/abs/2512.24880):
-*   **Параллельные потоки (n_hyper):** Модель поддерживает `n_hyper` параллельных остаточных потоков (по умолчанию 2). Каждый слой принимает текущую активацию + `n_hyper` последних выходов слоёв, обновляя FIFO-очередь.
-*   **Input-dependent attention:** Для каждого токена рассчитывается матрица сходства `q × k` между текущей активацией (`q`) и каждым из потоков (`k`). Веса смешивания зависят от входа — это не статическая свёртка.
-*   **Проекция Синхорна:** Чтобы избежать проблемы доминирования одного потока (Attention Sink), матрица связей проецируется на многообразие дважды стохастических матриц (Birkhoff Polytope) через `n_sinkhorn_iters` итераций алгоритма Синхорна-Кноппа. На инициализации диагональ смещена на `+5.0`, что даёт `H ≈ I` (свойство identity-mapping из mHC) и обеспечивает mAR как no-op в начале обучения.
-*   **Результат:** Каждая остаточная связь — это динамически взвешенная, дважды стохастическая комбинация последних `n_hyper` слоёв. Стохастичность гарантирует, что ни один поток не подавляет остальные; input-зависимость делает mAR **глобальным вниманием над иерархией слоёв**, заставляя каждый слой развивать уникальную специализацию.
-
-### 4. Гибридный токен-миксер (3:1 GDN-2 & MLA)
-Для удержания сверхдлинного контекста при минимальном расходе памяти VRAM модель использует пропорцию слоев 3:1:
-*   **GDN-2 (Gated DeltaNet-2):** 75% слоев работают на линейном внимании (NVIDIA Research, 2026). Раздельные сигмоидальные гейты стирания и записи (Decoupled Erase-Write) решают проблему забывания ассоциаций, обеспечивая константный размер кэша $O(1)$ [1].
-*   **MLA (Multi-Head Latent Attention):** 25% слоев выполняют функцию глобального внимания со сжатием KV-кэша до латентного размера $d_c = 128$. На контексте 128К весь кэш MLA занимает всего **~98 МБ**, что делает инференс длинного контекста доступным на обычных видеокартах.
-
-### 5. Смесь экспертов (MoE) с Blackboard Memory
-Блок MoE содержит 2 постоянно активных общих эксперта (`shared_experts`) и 4 разреженных эксперта (`routed_experts`), выбираемых по алгоритму Top-2. Они обмениваются информацией через шину памяти `Blackboard Memory`, предотвращая коллапс экспертов и балансируя вычисления.
-
-### 6. Multi-Token Prediction (MTP-4)
-Модель содержит 4 параллельные предсказательные головы. Во время претрейна они обучаются прогнозировать цепочку из 4 последующих байт ($t+1, t+2, t+3, t+4$) с затухающим весовым коэффициентом потерь. Это заставляет скрытые слои модели формировать внутреннюю модель планирования будущей речи.
+[![Python 3.12](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org)
+[![CUDA / MPS / CPU](https://img.shields.io/badge/device-CUDA%20%7C%20MPS%20%7C%20CPU-green.svg)](#hardware-support)
+[![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/license-CC%20BY--NC--SA%204.0-orange.svg)](./LICENSE)
+[![Docs: Starlight](https://img.shields.io/badge/docs-starlight-purple.svg)](https://sehaxe.github.io/busel-ai/)
 
 ---
 
-## 📈 Кибернетическая система обучения (Cybernetic Auto-Training Engine)
+## Why Busel exists
 
-Конвейер обучения Бусла полностью автоматизирован и защищен от типовых ошибок сходимости:
+Modern LLMs are big, expensive, and bound to GPUs. Busel is an experiment
+in whether the *scaling-laws ceiling* can be pushed down by:
 
-1.  **Параллельное смешивание потоков (Stream Interleaving):**
-    Загрузчик данных `data/pipeline.py` открывает стримеры ко всем файлам в папке `data_train/` одновременно (учебники Cosmopedia, код, диалоги Smoltalk) и на каждом шаге случайно берет чанк то из одного, то из другого файла. Это гарантирует идеальное смешивание данных в каждом батче и предотвращает катастрофическое забывание [1].
-2.  **Прогрессивный контекст (Sequence Length Warmup):**
-    Претрейн разбит на три фазы: первые 15% шагов модель учится на компактном контексте `1024 токена` (время шага снижено в 4 раза), с 15% до 35% прогресса контекст расширяется до `2048`, и затем разворачивается на полную мощность в `4096 токенов` для сложной логики.
-3.  **Автопланировщик Шиншиллы (Chinchilla Auto-Planner):**
-    Вам больше не нужно вручную рассчитывать количество шагов (`max_steps`). При старте система сама подсчитает точное количество параметров в вашей модели ($N$) и вычислит оптимальный объем данных по закону масштабирования для побайтовых моделей ($D_{\text{bytes}} \approx 80 \times N$). На основе этого и размеров вашего батча автопилот идеально спланирует шаги обучения.
-4.  **ByselAutoPilot v6.0:**
-    *   *Предиктивное подавление взрывов (Gradient Dampening):* отслеживает норму градиентов по $3\sigma$-правилу и мягко прижимает их при подозрении на градиентный взрыв, защищая веса.
-    *   *Адаптивный клиппинг (AGC):* динамический плавающий порог клиппинга, подстраивающийся под фазу обучения.
-    *   *Динамический Weight Decay:* снижен на этапе Warmup и на финальном сжатии для защиты латентных весов.
+1. **1.58-bit ternary weights** — every linear layer quantizes to `{-1, 0, +1}`
+   in the forward pass (real weights are kept in a master copy with STE updates).
+   At inference the math becomes pure additions on CPU, the model shrinks to
+   ~11 MB for a 50 M-param profile, and FP16 multiplications disappear.
+2. **Byte-level tokens (vocab=259)** — no BPE. No 40 % of the model wasted on
+   an embedding matrix. The same byte stream can carry text, code, JSON,
+   images (32×32×3 = 3072 bytes, byte `256` marker), and PDFs (via Docling).
+3. **mAR (Manifold Constrained Attention Residuals)** — replaces the
+   classical `y = x + f(x)` residual with an input-dependent, doubly-stochastic
+   mixture of the last `n_hyper` layer outputs projected onto the **Birkhoff
+   polytope** (Sinkhorn-Knopp). This is the combination of
+   [Kimi Attention Residuals](https://arxiv.org/abs/2603.15031) and
+   [DeepSeek mHC](https://arxiv.org/abs/2512.24880) called
+   **mAR** in Busel.
+4. **3:1 GDN-2 / MLA attention** — 75 % of layers are linear (GDN-2,
+   O(1) cache); 25 % are MLA (latent KV, `d_c=128`). A 128 K-token context
+   uses ~98 MB of MLA cache.
+5. **Hybrid Muon + AdamW** — `proj` weights go through the Muon Newton-Schulz
+   orthogonaliser; everything else (norms, biases, embeddings, router) uses
+   AdamW. Plus `buselAutoPilot` v6.0 — predictive 3σ dampening, adaptive
+   gradient clipping, dynamic weight decay.
+6. **Curriculum + Chinchilla auto-planner** — context grows 64 → 128 → 256
+   patches, batch adapts inversely to hold VRAM constant, and the exact step
+   count is derived from the Chinchilla byte-law
+   `D ≈ 80 × N` for the profile in use.
 
----
-
-## 📂 Структура репозитория
-
-```text
-bysel/
-├── configs/
-│   └── default.yaml     # Откалиброванные профили Shpak (48M) и Zubr (120M)
-├── model/
-│   ├── patching.py      # Gated FastBLT побайтовый гейт-патчер (Causal Left-Side Padding)
-│   ├── layers.py        # BitLinear, нативный Fused-RMSNorm и слитные Gate-Up GLU-блоки
-│   ├── attention.py     # Стабильный JIT GDN-2 и MLA со сжатием кэша
-│   ├── routing.py       # MoD-роутер и разреженный MoE с Blackboard шиной
-│   └── backbone.py      # Оркестратор ByselModel (3:1 Hybrid, mAR, MTP-4)
-├── data/
-│   └── pipeline.py      # Потоковый Byte-Streamer с параллельным смешиванием файлов и поддержкой PDF (Docling)
-├── training/
-│   ├── optimizer.py     # Moonlight-Muon с Transpose Trick + AdamW
-│   ├── autopilot.py     # Автопилот v6.0 (Dampening, AGC, Dynamic WD)
-│   └── recipe.py        # Многоголовый взвешенный лосс MTP-4
-├── tests/
-│   └── profiler_run.py  # Высокоточный, защищенный от зависаний профайлер шага v2.0
-├── Cargo.toml           # Сборщик Rust-расширения для nvme-io
-├── src/
-│   └── lib.rs           # Многопоточный Safe-Streamer на Rust (mmap-based)
-├── train.py             # Главный кибернетический оркестратор обучения
-└── debug_nan.py         # Изолированный диагностический стенд перехвата аномалий
-```
+The codebase is intentionally small — the entire model + training + data
+pipeline is ~2,300 lines of Python and ~140 lines of Rust, so you can read
+the whole thing in an afternoon.
 
 ---
 
-## 💻 Быстрый старт
-
-### 1. Подготовка окружения и зависимостей
-Синхронизируйте виртуальное окружение и установите все зависимости, объявленные в проекте:
+## Quick start
 
 ```bash
-# Инициализация и синхронизация зависимостей через uv
+# 1. Install Python deps (uses uv)
 uv sync
 
-# Добавление библиотек для нативного чтения PDF (рекомендуется)
+# 2. (Optional) Add PDF support
 uv add docling
-```
 
-### 2. Сборка модуля Rust I/O
-Соберите оптимизированное расширение Rust напрямую в активное виртуальное окружение:
-
-```bash
-# Компиляция и интеграция расширения Rust
+# 3. Compile the Rust byte-streamer into the venv
 uv run maturin develop --release
-```
 
-### 3. Автоматическая подготовка Chinchilla-оптимального датасета
-Скачайте весь современный мультимодальный стек данных (SmolLM-Corpus + Smoltalk SFT + COCO) для пресета **Шпак** одной командой:
-
-```bash
+# 4. Drop training data into data_train/ (or download via CLI)
+cp ~/my_corpus.txt data_train/
+# Or:
 uv run python cli.py download-all --preset shpak
-```
-*Все PDF-книги и учебники вы можете просто скопировать напрямую в папку `data_train/` — лоадер на лету оцифрует их через Docling.*
 
-### 4. Запуск обучения
-Для запуска процесса претрейна на доступном ускорителе (CUDA или MPS выберутся автоматически):
-
-```bash
-# Запуск профиля Шпак (48M)
+# 5. Train the 52 M-param Shpak profile end-to-end
 uv run train.py --profile shpak
 ```
 
+That's the whole pipeline. The first run is slow because `torch.compile`
+traces the model (≈30 s on RTX 5060 Ti for a small profile, longer for
+Shpak). Subsequent steps run at ~570 k tok/s on the validation profile.
+
 ---
 
-## 📊 Калибровка профилей (default.yaml)
+## Architecture in one minute
 
-| Параметр / Профиль | Shpak (Шпак) | Zubr (Зубр) |
-| :--- | :---: | :---: |
-| **Размерность ($d_{model}$)** | 384 | 384 |
-| **Количество слоев ($L$)** | 8 | 12 |
-| **Активных / Всего MoE экспертов** | 2 / 4 | 2 / 8 |
-| **Размерность словаря ($V$)** | 259 | 259 |
-| **Размер батча / контекста** | 32 / 4096 | 2 / 16384 |
-| **Всего параметров модели** | **52.8M** | **120.0M** |
-| **Активных параметров на токен** | **25.0M** | **35.0M** |
-| **Эквивалент плотной BPE-модели** | **~150M – 350M** | **~240M – 560M+** |
-| **Вес готовой упакованной модели** | **~11 МБ** | **~30 МБ** |
+```
+                    raw UTF-8 bytes (B × T)
+                              │
+                              ▼
+            ┌─────────────────────────────────────┐
+            │ StridedFastBLTPatcher              │  stride=4 conv
+            │   vocab=259 → d_byte=128 → d_model │  + sigmoid gate
+            └─────────────────────────────────────┘
+                              │  patches (B × T/4 × d_model)
+                              ▼
+            ╔═════════════════════════════════════╗
+            ║  buselModel (n_layers decoder)      ║
+            ║                                     ║
+            ║   for L in 1..n_layers:             ║
+            ║     h = ManifoldConstrainedAttnRes  ║  ← mAR: Sinkhorn on
+            ║         (current + n_hyper streams)║     Birkhoff polytope
+            ║     h = buselDecoderLayer(h)        ║  ← attn (GDN-2 or MLA)
+            ║                                     ║     + MoE (2 shared +
+            ║                                     ║       N routed, Top-2)
+            ╚═════════════════════════════════════╝
+                              │  hidden (B × T/4 × d_model)
+                              ▼
+            ┌─────────────────────────────────────┐
+            │ buselMTP4Pipeline (4 heads)         │  predict t+1..t+4
+            │  share embed_weight for projection  │  decay [1.0, .5, .25, .125]
+            └─────────────────────────────────────┘
+                              │
+                              ▼
+                       logits (B × T/4 × 259)
+```
 
-## 📄 Лицензия / License
+Read the deep dive in the docs:
+[**Architecture overview**](https://sehaxe.github.io/busel-ai/architecture/overview/).
 
-Этот проект лицензирован в соответствии с международной лицензией **Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)**.
+---
 
-*   **Авторство (BY):** Код принадлежит автору (`sehaxe`). При использовании или распространении проекта ссылка на автора обязательна.
-*   **Некоммерческое использование (NC):** Использование кода, моделей или весов в коммерческих целях без предварительного письменного согласия автора строго запрещено.
-*   **Сохранение условий (SA):** Все производные работы и модификации кода обязаны распространяться на тех же условиях (под лицензией CC BY-NC-SA 4.0).
+## Project layout
 
-Подробности см. на сайте [Creative Commons](http://creativecommons.org/licenses/by-nc-sa/4.0/). По вопросам коммерческого лицензирования обращайтесь к правообладателю.
+```
+busel-ai/
+├── model/              # BitNet v2 architecture (BitLinear, mAR, attention mix)
+├── training/           # Muon+AdamW hybrid optimizer, AutoPilot v6.0, MTP-4 loss
+├── data/               # Stream-interleaving byte loader (Rust mmap or Python)
+├── ui/                 # Teto Vocaloid emoticon + rich terminal helpers
+├── tools/              # CLI (typer), data_manager, orchestrator, plotter, inference
+├── tests/              # unittest suite (61 tests) + ultra-stable profiler v2.0
+├── busel_rust_io/      # PyO3 Rust ext: mmap ByteStreamer, ternary matmul, packer
+├── configs/            # default.yaml — Shpak / Zubr / Chyzh / micro_test / quick_test
+├── site/               # Astro+Starlight docs site (this wiki)
+├── busel_registry.py   # Plug-in extension-point registry
+├── busel_logging.py    # Structured JSONL event stream → checkpoints/busel.log.jsonl
+├── train.py            # Cybernetic training orchestrator
+├── cli.py              # Typer entrypoint (one CLI to rule them all)
+├── pyproject.toml      # uv-managed, maturin build backend
+└── AGENTS.md           # Machine-readable knowledge base (for LLMs and humans)
+```
+
+The **AGENTS.md** files (one per module) are the source of truth for code
+archaeology — every class, every convention, every anti-pattern, with line
+references. The **wiki at `site/`** is the human-friendly tour of the same
+material.
+
+---
+
+## Profiles (configs/default.yaml)
+
+| Profile    | d_model | n_layers | Experts | Total params | Active | Bit-size | Context |
+|------------|--------:|---------:|--------:|-------------:|-------:|---------:|--------:|
+| micro_test | 128     | 3        | 2       | ~2 M         | ~1 M   | —        | 256 B   |
+| quick_test | 128     | 4        | 2       | ~3 M         | ~1.5 M | —        | 256 B   |
+| validation | 128     | 3        | 2       | ~2 M         | ~1 M   | —        | 256 B   |
+| chyzh      | 192     | 6        | 4       | ~10 M        | ~5 M   | —        | 512 B   |
+| **shpak**  | 384     | 8        | 4       | **52.8 M**   | 25 M   | **11 MB** | 4096 B  |
+| zubr       | 384     | 12       | 8       | **120 M**    | 35 M   | **30 MB** | 16384 B |
+
+`max_steps` and `warmup_steps` can be `"auto"` — Busel computes them from
+the Chinchilla byte-law `D ≈ 80 × N` divided by `batch × ctx / 4`.
+
+---
+
+## Hardware support
+
+| Device | Precision | Notes |
+|--------|-----------|-------|
+| CUDA   | bf16      | Recommended. Full TF32 + cudnn.benchmark. |
+| MPS    | fp16      | Apple Silicon. No `torch.profiler` (hangs). |
+| CPU    | bf16      | Slowest, but trains. Inference-only path uses Rust ternary matmul (no GPU required). |
+
+Tested on **NVIDIA RTX 5060 Ti (16 GB, sm_120)** with PyTorch 2.12 + CUDA 13.0.
+
+---
+
+## Performance (RTX 5060 Ti, validation profile, batch=256 ctx=256)
+
+| Mode                            | tok/s   | vs eager |
+|---------------------------------|--------:|---------:|
+| Eager (no compile)              | 189,576 | 1.00×    |
+| `torch.compile` (default mode)  | **578,255** | **3.05×** |
+| `torch.compile` (reduce-overhead, CUDA graphs) | ❌ incompatible (mAR stream aliasing) | — |
+| `torch.compile` (max-autotune)  | ❌ slow compile (>5 min for shpak) | — |
+
+End-to-end training of the **validation** profile (200 steps, 3.28 M tokens):
+**~33 k tok/s average, loss 10.46 → 7.17 in 0.03 h.**
+
+See [Performance tuning](https://sehaxe.github.io/busel-ai/performance/compile-modes/)
+for the full guide and the torch.compile / FakeTensor gotcha.
+
+---
+
+## CLI surface
+
+```bash
+uv run train.py --profile shpak            # train
+uv run train.py --profile shpak --resume checkpoints/shpak_step_10000.pt
+uv run train.py --profile shpak --no-compile --no-checkpointing
+uv run train.py --profile shpak --compile-mode reduce-overhead
+
+uv run python tools/inference.py --checkpoint checkpoints/shpak_FINAL.pt
+uv run python tools/inference.py --repl   # interactive chat
+
+uv run python tools/profiler_run.py       # one-step CPU/GPU breakdown
+uv run python tools/plotter.py            # plot loss / lr / grad norm
+uv run python tools/orchestrator.py download --preset shpak
+```
+
+Every flag is documented inline; `uv run train.py --help` is the canonical
+reference.
+
+---
+
+## Documentation
+
+This README is the elevator pitch. The full wiki lives in [`site/`](./site/)
+and is published to <https://sehaxe.github.io/busel-ai/>.
+
+| Section | What's in it |
+|---------|--------------|
+| **Get Started** | Install, build, first training run |
+| **Architecture** | 1-bit weights, mAR, attention mix, MoE, MTP, patching |
+| **Training** | Training guide, AutoPilot, curriculum, optimizer |
+| **Data** | Pipeline, formats, presets, multimodal encoding |
+| **API** | Model classes, registry, logging, UI helpers |
+| **Performance** | torch.compile modes, hardware tuning, profiling |
+| **Operations** | Inference, troubleshooting, FAQ |
+
+To build the docs locally:
+
+```bash
+cd site
+bun install
+bun run dev      # localhost:4321
+bun run build    # static output to ./dist
+```
+
+---
+
+## The structured event log
+
+Every training run writes one JSON object per event to
+`checkpoints/busel.log.jsonl`. This is the future Telegram-bot's and
+web-dashboard's primary input. Stable schema:
+
+```jsonc
+{
+  "ts": "2026-06-04T01:21:34+00:00",
+  "level": "INFO",
+  "logger": "busel",
+  "event": "step_complete",
+  "step": 42,
+  "loss": 9.74,
+  "lr": 0.0006,
+  "aux_loss": 0.21,
+  "tokens_per_s": 33575,
+  "vram_mb": 545.2,
+  "extra": { /* freeform */ }
+}
+```
+
+Events emitted: `training_start`, `model_initialized`, `chinchilla_planned`,
+`curriculum_upgrade`, `step_complete`, `checkpoint_saved` /
+`checkpoint_rejected` / `checkpoint_failed`, `emergency_save_requested`,
+`emergency_checkpoint`, `training_complete`.
+
+---
+
+## License
+
+**CC BY-NC-SA 4.0** — see [LICENSE](./LICENSE) for the full text.
+
+The non-commercial clause is **non-negotiable**. If you want to use Busel
+weights or code in a commercial product, contact `sehaxe` for a written
+licence.
+
+---
+
+## Contributing / extending
+
+The intended extension model is the **registry** in
+[`busel_registry.py`](./busel_registry.py). To add a new attention
+mechanism when a new paper drops:
+
+```python
+from busel_registry import register
+
+@register("attention", "my_new_attention")
+class MyNewAttention(nn.Module):
+    def __init__(self, d_model, n_heads, **kw):
+        ...
+    def forward(self, x):
+        ...
+```
+
+It will be discoverable via `get("attention", "my_new_attention")` and
+listed in the registry dump. No central switch statement to edit.
+
+Tests live in [`tests/test_suite.py`](./tests/test_suite.py) (61 tests,
+verbose mode by default, no pytest, no torch.profiler on MPS). Add new
+tests there — never spawn a second test file.
+
+---
+
+## Acknowledgements
+
+Busel stands on the shoulders of:
+
+- **BitNet v2** (Ma et al., 2024) — 1.58-bit linear layers, H-BitLinear
+- **DeepSeek mHC** (Wang et al., 2025) — manifold-constrained residuals
+- **Kimi Attention Residuals** — input-dependent layer mixing
+- **GDN-2 / DeltaNet** (Yang et al., 2024–2026) — linear attention with
+  decoupled write/read gates
+- **MLA** (DeepSeek, 2024) — multi-head latent attention with `d_c=128`
+- **Muon** (Keller Jordan, 2024) — Newton-Schulz orthogonaliser for 2D
+  weights
+- **Multi-Token Prediction** (DeepSeek, 2024) — t+1..t+4 heads with
+  decaying loss
+- **Chinchilla scaling** (Hoffmann et al., 2022) — the byte-law
+
+And **Kasane Teto** for keeping the training process adorable.
