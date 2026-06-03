@@ -6,7 +6,7 @@
 """
 import typer
 from tools.data_manager import download_all, download_vision, download_text, download_sft, label_vision
-from tools.orchestrator import autopilot, train, profile, serve
+from tools.orchestrator import autopilot, train, profile
 
 app = typer.Typer(
     help="busel Master CLI Engine - Sovereign 1-bit Omni-LLM",
@@ -24,7 +24,6 @@ app.command(name="label-vision", help="🤖 Auto-label a local directory of imag
 app.command(name="autopilot", help="🛸 ULTIMATE ONE-CLICK AUTOPILOT: Verifies env, downloads data, profiles hardware, and launches training.")(autopilot)
 app.command(name="train", help="🔥 Manually start the core training loop.")(train)
 app.command(name="profile", help="📊 Run the ultra-stable step-by-step performance profiler (v2.0) on Mac/CUDA.")(profile)
-app.command(name="serve", help="⚡ Start the high-performance FastAPI inference API server.")(serve)
 
 # 💬 НОВАЯ КОМАНДА: Локальный интерактивный чат
 @app.command(name="chat", help="💬 Start interactive console chat with a trained model (auto-detects architecture).")
