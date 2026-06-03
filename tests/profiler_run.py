@@ -1,8 +1,10 @@
 """
-📊 busel ULTRA-STABLE PROFILER v2.0
+📊 busel ULTRA-STABLE PROFILER v2.1
 Оптимизирован для MPS (Apple Silicon) и CUDA.
 Избегает использования нестабильного torch.profiler, вызывающего зависания на macOS.
 Замеряет абсолютно все фазы шага обучения (Forward, Backward, Optimizer, Noise).
+
+v2.1: --backend {auto, custom, torch} — auto uses torch.profiler на CUDA, custom на MPS/CPU.
 """
 
 import os
@@ -21,6 +23,88 @@ from model.backbone import buselModel
 from training.optimizer import buselOptimizerEngine
 from training.autopilot import buselAutoPilot
 from training.recipe import buselLossEngine
+
+
+class StablebuselTorchProfiler:
+    """CUDA-only profiler using torch.profiler (kernel-level detail + Chrome trace export)."""
+
+    def __init__(self, device="cuda", steps=10, trace_path="checkpoints/busel_profiler_trace.json"):
+        self.device = device
+        self.steps = steps
+        self.trace_path = trace_path
+        if device != "cuda":
+            raise RuntimeError(f"StablebuselTorchProfiler requires CUDA (got {device}). torch.profiler hangs on MPS.")
+
+    def get_memory_stats(self):
+        return {
+            "allocated_mb": torch.cuda.memory_allocated() / 1024**2,
+            "peak_mb": torch.cuda.max_memory_allocated() / 1024**2,
+        }
+
+    def run_profiling(self, model, patcher, dataloader_iter, opt_engine, loss_engine, cfg):
+        print(f"🔥 Warmup (2 steps)...", end=" ", flush=True)
+        for _ in range(2):
+            byte_batch, _, _ = next(dataloader_iter)
+            byte_batch = byte_batch.to(self.device, non_blocking=True)
+            opt_engine.zero_grad(set_to_none=True)
+            input_bytes = byte_batch[:, :-patcher.stride] if byte_batch.shape[1] > patcher.stride else byte_batch
+            with torch.autocast(device_type=self.device, dtype=torch.bfloat16):
+                patches = patcher(input_bytes)
+                T_patches = patches.shape[1]
+                targets = byte_batch[:, 1::patcher.stride][:, :T_patches]
+                if targets.shape[1] < T_patches:
+                    targets = torch.nn.functional.pad(targets, (0, T_patches - targets.shape[1]), value=0)
+                (logits_t1, _, _, _), aux_loss = model(patches, None)
+                loss = loss_engine.compute_pretrain_loss(logits_t1, targets) + aux_loss.float()
+            loss.backward()
+            opt_engine.step()
+        torch.cuda.synchronize()
+        print("✅")
+
+        print(f"📊 torch.profiler collecting ({self.steps} steps)...")
+        model.train()
+        patcher.train()
+
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=False,
+        ) as prof:
+            for step in range(self.steps):
+                byte_batch, _, _ = next(dataloader_iter)
+                byte_batch = byte_batch.to(self.device, non_blocking=True)
+                opt_engine.zero_grad(set_to_none=True)
+                input_bytes = byte_batch[:, :-patcher.stride] if byte_batch.shape[1] > patcher.stride else byte_batch
+                with torch.autocast(device_type=self.device, dtype=torch.bfloat16):
+                    patches = patcher(input_bytes)
+                    T_patches = patches.shape[1]
+                    targets = byte_batch[:, 1::patcher.stride][:, :T_patches]
+                    if targets.shape[1] < T_patches:
+                        targets = torch.nn.functional.pad(targets, (0, T_patches - targets.shape[1]), value=0)
+                    (logits_t1, _, _, _), aux_loss = model(patches, None)
+                    loss = loss_engine.compute_pretrain_loss(logits_t1, targets) + aux_loss.float()
+                loss.backward()
+                opt_engine.step()
+                prof.step()
+
+        os.makedirs(os.path.dirname(self.trace_path) or ".", exist_ok=True)
+        prof.export_chrome_trace(self.trace_path)
+        return self.get_memory_stats(), prof
+
+    def print_report(self, memory_stats, prof, total_params, cfg):
+        print("\n" + "=" * 80)
+        print("📊 busel TORCH.PROFILER REPORT (CUDA)".center(80))
+        print("=" * 80)
+        print(f"\n🧠 MODEL: {total_params:,} params ({total_params * 2 / 1024**2:.2f} MB FP16)")
+        print(f"\n💾 MEMORY (CUDA):")
+        for k, v in memory_stats.items():
+            print(f"   • {k}: {v:.2f} MB")
+        print("\n🔧 TOP 20 CUDA KERNELS (by total time):")
+        print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))
+        print(f"\n💾 Chrome trace saved to: {self.trace_path}")
+        print("   Open in chrome://tracing or https://ui.perfetto.dev/ for full kernel timeline.")
+        print("=" * 80)
 
 
 class StablebuselProfiler:
@@ -55,18 +139,17 @@ class StablebuselProfiler:
             byte_batch = byte_batch.to(self.device, non_blocking=True)
             opt_engine.zero_grad(set_to_none=True)
             input_bytes = byte_batch[:, :-patcher.stride] if byte_batch.shape[1] > patcher.stride else byte_batch
-            
+
             with torch.autocast(device_type=self.device, dtype=torch.float16 if self.device == "mps" else torch.bfloat16):
                 patches = patcher(input_bytes)
                 T_patches = patches.shape[1]
-                # Срезы таргетов
-                targets = byte_batch[:, patcher.stride::patcher.stride][:, :T_patches]
+                targets = byte_batch[:, 1::patcher.stride][:, :T_patches]
                 if targets.shape[1] < T_patches:
                     targets = torch.nn.functional.pad(targets, (0, T_patches - targets.shape[1]), value=0)
-                
+
                 (logits_t1, _, _, _), aux_loss = model(patches, None)
                 loss = loss_engine.compute_pretrain_loss(logits_t1, targets) + aux_loss.float()
-            
+
             loss.backward()
             opt_engine.step()
             
@@ -263,8 +346,28 @@ class StablebuselProfiler:
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="busel Stable Step Profiler (v2.1)")
+    parser.add_argument("--backend", type=str, default="auto",
+                        choices=["auto", "custom", "torch"],
+                        help="Profiler backend: auto (torch on CUDA, custom on MPS/CPU), custom (manual perf_counter, stable everywhere), torch (torch.profiler, hangs on MPS — CUDA only).")
+    parser.add_argument("--trace", type=str, default="checkpoints/busel_profiler_trace.json",
+                        help="Output path for torch.profiler Chrome trace (only used with --backend torch).")
+    args = parser.parse_args()
+
     device = "mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
-    
+
+    if args.backend == "auto":
+        backend = "torch" if device == "cuda" else "custom"
+    else:
+        backend = args.backend
+
+    if backend == "torch" and device != "cuda":
+        print(f"⚠️  --backend torch is only safe on CUDA (current device: {device.upper()}). Falling back to custom.")
+        backend = "custom"
+
+    print(f"🖥️  Device: {device.upper()}  |  Profiler backend: {backend}")
+
     # Конфигурация для замера скорости (ziaziulia)
     class Config:
         vocab_size = 259
@@ -318,13 +421,20 @@ def main():
     )
     
     # Запуск
-    profiler = StablebuselProfiler(device=device, steps=10)
     total_params = sum(p.numel() for p in model.parameters())
-    
+
     try:
-        timings = profiler.run_profiling(model, patcher, dataloader_iter, opt_engine, loss_engine, autopilot, cfg)
-        memory_stats = profiler.get_memory_stats()
-        profiler.print_report(timings, memory_stats, total_params, cfg)
+        if backend == "custom":
+            profiler = StablebuselProfiler(device=device, steps=10)
+            timings = profiler.run_profiling(model, patcher, dataloader_iter, opt_engine, loss_engine, autopilot, cfg)
+            memory_stats = profiler.get_memory_stats()
+            profiler.print_report(timings, memory_stats, total_params, cfg)
+        elif backend == "torch":
+            torch_profiler = StablebuselTorchProfiler(device=device, steps=10, trace_path=args.trace)
+            memory_stats, prof = torch_profiler.run_profiling(model, patcher, dataloader_iter, opt_engine, loss_engine, cfg)
+            torch_profiler.print_report(memory_stats, prof, total_params, cfg)
+        else:
+            raise RuntimeError(f"Unknown backend: {backend}")
     finally:
         # Чистка
         if created_dir:
