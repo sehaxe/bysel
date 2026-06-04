@@ -111,13 +111,61 @@ class buselLossEngine:
     def compute_kto_loss(self, policy_logps, reference_logps, labels, beta=0.1, kl_weight=0.1):
         log_ratios = policy_logps - reference_logps
         kl = torch.clamp(log_ratios, min=0.0).mean()
-        
+
         losses = []
         for log_ratio, label in zip(log_ratios, labels):
             if label == 1:
                 losses.append(-F.logsigmoid(beta * (log_ratio - kl)))
             else:
                 losses.append(-F.logsigmoid(beta * (kl - log_ratio)))
-        
+
         kto_loss = torch.stack(losses).mean() + kl_weight * kl
         return kto_loss
+
+    @staticmethod
+    def compute_dpo_loss(
+        policy_chosen_logps: torch.Tensor,
+        policy_rejected_logps: torch.Tensor,
+        reference_chosen_logps: torch.Tensor,
+        reference_rejected_logps: torch.Tensor,
+        beta: float = 0.1,
+    ) -> torch.Tensor:
+        """Direct Preference Optimization loss (Rafailov et al. 2023).
+
+        L_DPO = -E[log_sigmoid(β · (log π_θ(y_w|x)/π_θ(y_l|x)
+                                   - log π_ref(y_w|x)/π_ref(y_l|x)))]
+
+        Args:
+            policy_chosen_logps: (B,) sum of log P(chosen | prompt) under policy
+            policy_rejected_logps: (B,) sum of log P(rejected | prompt) under policy
+            reference_chosen_logps: (B,) sum under frozen reference (SFT model)
+            reference_rejected_logps: (B,) sum under frozen reference
+            beta: KL penalty coefficient. Default 0.1 (Rafailov paper).
+
+        Returns:
+            Scalar DPO loss.
+        """
+        pi_logratios = policy_chosen_logps - policy_rejected_logps
+        ref_logratios = reference_chosen_logps - reference_rejected_logps
+        logits = beta * (pi_logratios - ref_logratios)
+        return -F.logsigmoid(logits).mean()
+
+    @staticmethod
+    def compute_sequence_logprob(
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Sum log P(target[t] | logits[t]) over positions where mask=1.
+
+        Args:
+            logits: (B, T, V) output of the model head.
+            targets: (B, T) integer target token IDs.
+            mask: (B, T) float/int 0/1; only mask=1 positions contribute.
+
+        Returns:
+            (B,) tensor of per-sequence log-probability sums.
+        """
+        log_probs = F.log_softmax(logits, dim=-1)
+        target_log_probs = log_probs.gather(-1, targets.unsqueeze(-1).long()).squeeze(-1)
+        return (target_log_probs * mask.float()).sum(dim=-1)

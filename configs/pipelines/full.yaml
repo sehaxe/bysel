@@ -1,0 +1,34 @@
+name: full
+description: "Full busel training pipeline: pretrain → SFT → DPO → eval. Target: chat-capable + tool-capable + safety-aligned model."
+
+stages:
+  - name: pretrain
+    data_preset: shpak
+    params:
+      max_steps: "auto"
+      warmup_steps: "auto"
+
+  - name: sft
+    data_preset: sft-shpak-chat
+    params:
+      data_glob: "data_train/sft/**/*.jsonl"
+      max_steps: 500
+      warmup_steps: 30
+      sft_lr_scale: 0.3
+
+  - name: dpo
+    data_preset: dpo-shpak
+    params:
+      data_glob: "data_train/dpo/**/*.jsonl"
+      max_steps: 300
+      warmup_steps: 20
+      beta: 0.1
+      dpo_lr_scale: 0.1
+
+  - name: eval
+    params:
+      data_path: "data_train"
+      sft_glob: "data_train/sft/**/*.jsonl"
+      max_perplexity_samples: 16
+      max_sft_examples: 8
+      max_format_prompts: 4

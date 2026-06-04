@@ -1,0 +1,17 @@
+name: quick
+description: "Quick smoke test: pretrain only + eval. No SFT/DPO. Verifies the pipeline runs end-to-end on a fresh model."
+
+stages:
+  - name: pretrain
+    data_preset: chyzh
+    params:
+      max_steps: 50
+      warmup_steps: 10
+
+  - name: eval
+    params:
+      data_path: "data_train"
+      sft_glob: "data_train/sft/**/*.jsonl"
+      max_perplexity_samples: 4
+      max_sft_examples: 2
+      max_format_prompts: 2

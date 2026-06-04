@@ -1,17 +1,20 @@
 # training/ — Optimizer, AutoPilot, Loss, **Stage Framework**
 
-**Scope:** Hybrid Muon+AdamW, predictive AutoPilot v6.0, MTP-4 weighted loss engine, **v5.5 multi-stage pipeline framework**.
+**Scope:** Hybrid Muon+AdamW, predictive AutoPilot v6.0, MTP-4 weighted loss engine, **v5.5 multi-stage pipeline framework**, **v5.6 SFT/DPO/eval stages**.
 
 ## STRUCTURE
 ```
 training/
 ├── optimizer.py    # Muon (Newton-Schulz ×5), buselOptimizerEngine (hybrid Muon+AdamW)
 ├── autopilot.py    # buselAutoPilot v6.0 — predictive dampening, adaptive AGC, dynamic WD
-├── recipe.py       # buselLossEngine — pretrain (MTP-4 weighted), SFT, KTO losses
-└── stages/         # 🛸 v5.5 NEW — multi-stage pipeline framework
-    ├── __init__.py  # Public API exports; eager-imports stage modules
+├── recipe.py       # buselLossEngine — pretrain, SFT, KTO, DPO losses
+└── stages/         # 🛸 v5.5 + 🤖 v5.6 — multi-stage pipeline framework
+    ├── __init__.py  # Public API exports; eager-imports all 4 stage modules
     ├── base.py      # BaseStage Protocol, StageState/StageSpec/PipelineConfig, register_stage, load_pipeline_yaml
-    └── pretrain.py  # buselPretrainStage — pretrain stage (extracted from train.py:main)
+    ├── pretrain.py  # buselPretrainStage — pretrain stage (extracted from train.py:main)
+    ├── sft.py       # 🤖 v5.6 — buselSFTStage (chat-format SFT with masked CE)
+    ├── dpo.py       # 🤖 v5.6 — buselDPOStage (Rafailov et al. 2023 DPO)
+    └── eval.py      # 🛰️ v5.6 — buselEvalStage (4-metric eval suite)
 ```
 
 ## WHERE TO LOOK

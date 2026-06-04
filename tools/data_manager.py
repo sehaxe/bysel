@@ -6,6 +6,14 @@ import shutil
 import urllib.request
 import typer
 
+from data.presets import (
+    FMT_CHAT_MESSAGES,
+    FMT_PROMPT_CHOSEN_REJECTED,
+    FMT_INSTRUCTION_INPUT_OUTPUT,
+    FMT_CODE_PROBLEM_SOLUTION,
+    FMT_TOOL_CALL,
+)
+
 # Ограничиваем потоки pyarrow для предотвращения GIL-конфликтов на выходе
 try:
     import pyarrow
@@ -298,6 +306,179 @@ def download_sft(
         if preset_clean in PRESETS:
             limit = PRESETS[preset_clean]["sft_limit"]
     _download_sft(limit, source)
+
+
+def _hf_row_to_sft_jsonl(row: dict, format_adapter: str) -> dict | None:
+    """Convert a raw HF row into the project's SFT/DPO JSONL schema.
+
+    Returns None for rows that don't match the expected schema (skipped).
+    Output schema:
+      - FMT_CHAT_MESSAGES: {"messages": [{"role": ..., "content": ...}, ...]}
+      - FMT_PROMPT_CHOSEN_REJECTED: {"prompt": str, "chosen": str, "rejected": str}
+      - FMT_INSTRUCTION_INPUT_OUTPUT: {"messages": [{"role":"user", "content": instruction+input},
+                                                     {"role":"assistant", "content": output}]}
+      - FMT_CODE_PROBLEM_SOLUTION: {"messages": [{"role":"user", "content": problem},
+                                                   {"role":"assistant", "content": solution}]}
+      - FMT_TOOL_CALL: {"messages": [{"role":"user", "content": query},
+                                       {"role":"assistant", "content": tool_calls}]}
+    """
+    if format_adapter == FMT_CHAT_MESSAGES:
+        messages = row.get("messages")
+        if not messages or not isinstance(messages, list):
+            return None
+        cleaned = []
+        for m in messages:
+            if not isinstance(m, dict) or "role" not in m or "content" not in m:
+                continue
+            role = str(m["role"]).strip().lower()
+            content = str(m["content"]).strip()
+            if role not in ("system", "user", "assistant", "tool") or not content:
+                continue
+            cleaned.append({"role": role, "content": content})
+        return {"messages": cleaned} if cleaned else None
+
+    if format_adapter == FMT_PROMPT_CHOSEN_REJECTED:
+        chosen = row.get("chosen")
+        rejected = row.get("rejected")
+        if isinstance(chosen, list) and len(chosen) >= 1:
+            prompt = "\n".join(str(m.get("content", "")) for m in chosen[:-1]).strip()
+            chosen_text = str(chosen[-1].get("content", "")).strip()
+        else:
+            prompt = str(row.get("prompt", "")).strip()
+            chosen_text = str(chosen).strip() if chosen else ""
+        if isinstance(rejected, list) and len(rejected) >= 1:
+            rejected_text = str(rejected[-1].get("content", "")).strip()
+        else:
+            rejected_text = str(rejected).strip() if rejected else ""
+        if not prompt or not chosen_text or not rejected_text:
+            return None
+        return {"prompt": prompt, "chosen": chosen_text, "rejected": rejected_text}
+
+    if format_adapter == FMT_INSTRUCTION_INPUT_OUTPUT:
+        instruction = str(row.get("instruction", "")).strip()
+        output = str(row.get("output", "")).strip()
+        inp = str(row.get("input", "")).strip()
+        if not instruction or not output:
+            return None
+        user_content = instruction if not inp else f"{instruction}\n\n{inp}"
+        return {
+            "messages": [
+                {"role": "user", "content": user_content},
+                {"role": "assistant", "content": output},
+            ]
+        }
+
+    if format_adapter == FMT_CODE_PROBLEM_SOLUTION:
+        problem = str(row.get("problem", row.get("instruction", ""))).strip()
+        solution = str(row.get("solution", row.get("output", ""))).strip()
+        if not problem or not solution:
+            return None
+        return {
+            "messages": [
+                {"role": "user", "content": problem},
+                {"role": "assistant", "content": solution},
+            ]
+        }
+
+    if format_adapter == FMT_TOOL_CALL:
+        query = str(row.get("query", row.get("question", ""))).strip()
+        if not query:
+            return None
+        calls_str = json.dumps(row.get("tools", row.get("answers", [])))
+        return {
+            "messages": [
+                {"role": "user", "content": query},
+                {"role": "assistant", "content": calls_str},
+            ]
+        }
+
+    return None
+
+
+def _download_preset(preset_name: str, limit: int | None, output_override: str | None):
+    from data.presets import resolve_preset
+    plan = resolve_preset(preset_name, override_limit=limit)
+    from datasets import load_dataset
+    import warnings
+    warnings.filterwarnings("ignore")
+
+    output_dir = os.path.join(DATA_DIR, plan["output_subdir"])
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = output_override or os.path.join(output_dir, f"{preset_name}.jsonl")
+
+    if os.path.exists(output_path) and os.path.getsize(output_path) > 1024:
+        size_mb = os.path.getsize(output_path) / (1024 * 1024)
+        typer.echo(typer.style(
+            f"📁 Preset '{preset_name}' already exists at '{output_path}' "
+            f"({size_mb:.2f} MB). Skipping.",
+            fg=typer.colors.GREEN,
+        ))
+        return
+
+    target = plan["limit"]
+    fmt = plan["format_adapter"]
+    typer.echo(typer.style(
+        f"📥 Streaming preset {preset_name!r} from HF ({plan['hf_dataset']}, "
+        f"split={plan['split']}, limit={target}, format={fmt})...",
+        fg=typer.colors.CYAN,
+    ))
+
+    try:
+        dataset = load_dataset(plan["hf_dataset"], split=plan["split"], streaming=True)
+    except Exception as e:
+        typer.echo(typer.style(f"❌ Failed to load: {e}", fg=typer.colors.RED, bold=True))
+        return
+
+    count = 0
+    skipped = 0
+    with open(output_path, "a", encoding="utf-8") as f:
+        for row in dataset:
+            if count >= target:
+                break
+            try:
+                converted = _hf_row_to_sft_jsonl(row, fmt)
+                if converted is None:
+                    skipped += 1
+                    continue
+                f.write(json.dumps(converted, ensure_ascii=False) + "\n")
+                count += 1
+                if count % 500 == 0:
+                    typer.echo(f"   Downloaded: {count}/{target} (skipped {skipped} malformed)...")
+            except Exception:
+                skipped += 1
+                continue
+
+    typer.echo(typer.style(
+        f"✅ Preset {preset_name!r}: saved {count} examples to '{output_path}' "
+        f"({skipped} skipped).",
+        fg=typer.colors.GREEN,
+    ))
+
+    del dataset
+    import gc
+    gc.collect()
+
+
+@app.command(name="download-preset")
+def download_preset(
+    name: str = typer.Option(..., "--name", "-n", help="Preset name (see data/presets.py:list_presets)"),
+    limit: int = typer.Option(None, "--limit", "-l", help="Override preset's default limit"),
+    output: str = typer.Option(None, "--output", "-o", help="Override output JSONL path"),
+):
+    """📚 Download a named data preset (SFT/DPO) into data_train/<stage>/<preset>/."""
+    _download_preset(name, limit, output)
+
+
+@app.command(name="list-presets")
+def list_presets_cmd(
+    stage: str = typer.Option(None, "--stage", "-s", help="Filter by stage: 'sft' or 'dpo'"),
+):
+    """📚 List all available data presets (optionally filter by stage)."""
+    from data.presets import list_presets
+    names = list_presets(stage)
+    typer.echo(typer.style(f"📚 Available presets ({len(names)}):", fg=typer.colors.CYAN, bold=True))
+    for n in names:
+        typer.echo(f"  - {n}")
 
 
 @app.command()

@@ -109,8 +109,19 @@ def pipeline(
     for i, s in enumerate(pipeline_cfg.stages, 1):
         typer.echo(typer.style(f"   {i}. {s.name}  data={s.data_preset or '-'}  resume={s.resume or '-'}", fg=typer.colors.CYAN))
 
+    import yaml as _yaml
+    with open("configs/default.yaml", "r", encoding="utf-8") as f:
+        _default_profiles = _yaml.safe_load(f).get("profiles", {})
+
+    def _resolve_resume(stage_name: str, default_resume: str | None) -> str | None:
+        if default_resume:
+            return default_resume
+        candidate = f"checkpoints/busel_{pipeline_cfg.name}_{stage_name}_FINAL.pt"
+        return candidate if os.path.exists(candidate) else None
+
     state = StageState()
     skipping = bool(start_stage)
+    running_resume: str | None = None
 
     for i, stage_spec in enumerate(pipeline_cfg.stages, 1):
         if skipping:
@@ -128,22 +139,21 @@ def pipeline(
 
         merged_params = {**pipeline_cfg.global_params, **stage_spec.params}
         profile_name = merged_params.pop("profile_name", stage_spec.data_preset or "shpak")
+        profile_dict = _default_profiles.get(profile_name)
+        if profile_dict is None:
+            raise ValueError(f"Profile {profile_name!r} not in configs/default.yaml")
+
+        resume = _resolve_resume(stage_spec.name, stage_spec.resume)
+        if running_resume and stage_spec.name != "pretrain" and not stage_spec.resume:
+            resume = running_resume
+
         try:
-            if stage_spec.name == "pretrain":
-                import yaml as _yaml
-                with open("configs/default.yaml", "r", encoding="utf-8") as f:
-                    full = _yaml.safe_load(f)
-                profile_dict = full["profiles"].get(profile_name)
-                if profile_dict is None:
-                    raise ValueError(f"Profile {profile_name!r} not in configs/default.yaml")
-                profile_dict = {**profile_dict, "training": {**profile_dict.get("training", {}), **merged_params}}
-                stage.setup(
-                    profile=profile_dict,
-                    profile_name=profile_name,
-                    resume=stage_spec.resume,
-                )
-            else:
-                stage.setup(merged_params)
+            stage.setup(
+                profile=profile_dict,
+                profile_name=profile_name,
+                resume=resume,
+                stage_params=merged_params,
+            )
         except Exception as e:
             typer.echo(typer.style(f"❌ Stage {stage_spec.name} setup() failed: {type(e).__name__}: {e}", fg=typer.colors.RED))
             log_event("stage_failed", stage=stage_spec.name, phase="setup", error=str(e))
@@ -164,6 +174,9 @@ def pipeline(
             typer.echo(typer.style(f"❌ Stage {stage_spec.name} finalize() failed: {type(e).__name__}: {e}", fg=typer.colors.RED))
             log_event("stage_failed", stage=stage_spec.name, phase="finalize", error=str(e))
             raise typer.Exit(code=1)
+
+        if state.last_checkpoint_path:
+            running_resume = state.last_checkpoint_path
 
     log_event("pipeline_complete", pipeline=pipeline_cfg.name, total_stages=len(pipeline_cfg.stages))
     typer.echo(typer.style(f"\n🎉 Pipeline {pipeline_cfg.name} complete! {len(pipeline_cfg.stages)} stages succeeded.", fg=typer.colors.GREEN, bold=True))

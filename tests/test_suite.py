@@ -72,6 +72,11 @@ try:
         MOD_TEXT,
         BOS,
         EOS,
+        PAD,
+        ROLE_SYSTEM,
+        ROLE_USER,
+        ROLE_ASSISTANT,
+        ROLE_TOOL,
         THINK_START,
         THINK_END,
         TOOL_BASH,
@@ -1749,6 +1754,291 @@ class TestbuselFramework(unittest.TestCase):
         # also have a __name__.
         self.assertEqual(pipeline.__name__, "pipeline")
         print(f"   ✅ tools.orchestrator.pipeline exists, callable, name='{pipeline.__name__}'.")
+
+    # ════════════════════════════════════════════════════════════════════
+    #  PHASE 3 — SFT (data/sft.py + training/stages/sft.py)
+    # ════════════════════════════════════════════════════════════════════
+
+    @unittest.skipUnless(HAS_SPECIAL_TOKENS, "special tokens required")
+    def test_sft_format_chat_messages_basic(self):
+        """🤖 [SFT-1] format_chat_messages produces BOS/ROLE/EOS structure."""
+        print("🧪 [SFT-1] format_chat_messages produces BOS/ROLE/EOS structure...")
+        from data.sft import format_chat_messages
+        messages = [
+            {"role": "system", "content": "Be helpful."},
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Hello!"},
+        ]
+        b, m = format_chat_messages(messages)
+        self.assertEqual(len(b), len(m))
+        self.assertGreater(len(b), 0)
+        self.assertEqual(b[0], int(BOS), "first token must be BOS")
+        # Find the assistant content range; mask must be 1 there.
+        assistant_idx = b.index(int(ROLE_ASSISTANT))
+        # mask at assistant_idx+1 (the first content byte) must be 1
+        self.assertEqual(m[assistant_idx + 1], 1, "first assistant-content position must be masked 1")
+        # mask at the ROLE_ASSISTANT token itself must be 0
+        self.assertEqual(m[assistant_idx], 0, "ROLE_ASSISTANT token position must be masked 0")
+        print(f"   ✅ {len(b)} bytes, {sum(m)} mask=1 positions (assistant content + EOS).")
+
+    @unittest.skipUnless(HAS_SPECIAL_TOKENS, "special tokens required")
+    def test_sft_format_chat_messages_mask_correctness(self):
+        """🤖 [SFT-2] format_chat_messages mask is 0 for system/user/tool, 1 for assistant."""
+        print("🧪 [SFT-2] format_chat_messages mask correctness...")
+        from data.sft import format_chat_messages
+        b, m = format_chat_messages([
+            {"role": "system", "content": "SYS"},
+            {"role": "user", "content": "USR"},
+            {"role": "assistant", "content": "AS"},
+        ])
+        # Find the user content position and verify mask=0
+        user_idx = b.index(int(ROLE_USER))
+        self.assertEqual(m[user_idx + 1], 0, "user content must be masked 0")
+        # System content
+        sys_idx = b.index(int(ROLE_SYSTEM))
+        self.assertEqual(m[sys_idx + 1], 0, "system content must be masked 0")
+        # Assistant content (first content byte after ROLE_ASSISTANT)
+        asst_idx = b.index(int(ROLE_ASSISTANT))
+        self.assertEqual(m[asst_idx + 1], 1, "assistant content must be masked 1")
+        # The final EOS is after the assistant turn (assistant is last in this test)
+        last_eos = len(b) - 1 - b[::-1].index(int(EOS))
+        self.assertEqual(b[last_eos], int(EOS))
+        self.assertEqual(m[last_eos], 1, "final EOS (after assistant turn) must be masked 1")
+        # Total mask=1 count must equal len("AS") + 1 (for final EOS) = 3
+        self.assertEqual(sum(m), 3, f"expected 3 mask=1 positions (AS + EOS), got {sum(m)}")
+        print(f"   ✅ system/user masked 0; assistant content + final EOS masked 1; total mask=1 = {sum(m)}.")
+
+    @unittest.skipUnless(HAS_SPECIAL_TOKENS, "special tokens required")
+    def test_sft_format_dpo_pair(self):
+        """🤖 [SFT-3] format_dpo_pair produces chosen+rejected with matching prompt mask."""
+        print("🧪 [SFT-3] format_dpo_pair produces chosen + rejected with shared prompt...")
+        from data.sft import format_dpo_pair
+        cb, cm, rb, rm = format_dpo_pair("Q?", "good answer", "bad answer")
+        self.assertGreater(len(cb), 0)
+        self.assertGreater(len(rb), 0)
+        self.assertEqual(len(cb), len(cm))
+        self.assertEqual(len(rb), len(rm))
+        # Both should contain the prompt
+        prompt_bytes = list("Q?".encode("utf-8"))
+        self.assertTrue(any(prompt_bytes[0] == cb[i] for i in range(len(cb))))
+        # Both should have at least one mask=1
+        self.assertGreater(sum(cm), 0)
+        self.assertGreater(sum(rm), 0)
+        print(f"   ✅ chosen={len(cb)} bytes/{sum(cm)} mask=1; rejected={len(rb)} bytes/{sum(rm)} mask=1.")
+
+    @unittest.skipUnless(HAS_SPECIAL_TOKENS, "special tokens required")
+    def test_sft_dataloader_yields_matching_tensors(self):
+        """🤖 [SFT-4] get_sft_dataloader yields (bytes, mask) batches with matching shapes."""
+        print("🧪 [SFT-4] get_sft_dataloader yields matching (bytes, mask) tensors...")
+        import tempfile
+        from data.sft import get_sft_dataloader
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write(json.dumps({"messages": [
+                {"role": "user", "content": "Q1?"},
+                {"role": "assistant", "content": "A1"},
+            ]}) + "\n")
+            f.write(json.dumps({"messages": [
+                {"role": "user", "content": "Q2?"},
+                {"role": "assistant", "content": "A2 long answer here"},
+            ]}) + "\n")
+            tmp = f.name
+        try:
+            dl = get_sft_dataloader([tmp], chunk_size=64, batch_size=2)
+            it = iter(dl)
+            batch = next(it)
+            self.assertEqual(len(batch), 2, "batch should be (bytes, mask)")
+            bytes_b, mask_b = batch
+            self.assertEqual(bytes_b.shape, mask_b.shape)
+            self.assertEqual(bytes_b.dtype, torch.int32)
+            self.assertEqual(mask_b.dtype, torch.int32)
+            self.assertGreater(bytes_b.shape[0], 0)
+            self.assertGreater(bytes_b.shape[1], 0)
+            print(f"   ✅ batch shapes: bytes={tuple(bytes_b.shape)}, mask={tuple(mask_b.shape)}")
+        finally:
+            os.unlink(tmp)
+
+    @unittest.skipUnless(HAS_TRAINING_STAGES, "stages required")
+    def test_sft_config_from_profile(self):
+        """🤖 [SFT-5] buselSFTConfig.from_profile parses profile dict + stage_params."""
+        print("🧪 [SFT-5] buselSFTConfig.from_profile parses profile + stage_params...")
+        from training.stages.sft import buselSFTConfig
+        profile = {
+            "model": {"d_model": 128, "n_layers": 3, "n_heads": 4, "vocab_size": 326, "n_hyper": 2},
+            "data": {"chunk_size": 256, "batch_size": 16},
+            "training": {"learning_rate_muon": 0.001, "learning_rate_adamw": 0.0001},
+        }
+        cfg = buselSFTConfig.from_profile(profile, {"max_steps": 200, "sft_lr_scale": 0.5})
+        self.assertEqual(cfg.d_model, 128)
+        self.assertEqual(cfg.vocab_size, 326)
+        self.assertEqual(cfg.max_steps, 200)
+        # SFT LR is 0.5x the base
+        self.assertAlmostEqual(cfg.learning_rate_muon, 0.0005, places=7)
+        self.assertAlmostEqual(cfg.learning_rate_adamw, 0.00005, places=8)
+        print(f"   ✅ SFTConfig: d_model={cfg.d_model}, max_steps={cfg.max_steps}, lr_muon={cfg.learning_rate_muon:.6f}")
+
+    # ════════════════════════════════════════════════════════════════════
+    #  PHASE 5 — DPO (data/dpo.py + training/stages/dpo.py + recipe.py)
+    # ════════════════════════════════════════════════════════════════════
+
+    def test_dpo_loss_finite_scalar(self):
+        """🤖 [DPO-1] buselLossEngine.compute_dpo_loss returns a finite scalar."""
+        print("🧪 [DPO-1] buselLossEngine.compute_dpo_loss returns a finite scalar...")
+        torch.manual_seed(0)
+        B = 8
+        pc = torch.randn(B) * 2
+        pr = torch.randn(B) * 2
+        rc = torch.randn(B) * 2
+        rr = torch.randn(B) * 2
+        loss = buselLossEngine.compute_dpo_loss(pc, pr, rc, rr, beta=0.1)
+        self.assertTrue(torch.isfinite(loss).item(), f"DPO loss must be finite, got {loss.item()}")
+        self.assertEqual(loss.dim(), 0, "DPO loss must be a scalar")
+        # Symmetric case: chosen_logp - rejected_logp is the same for policy and reference
+        # → logits=0 → loss = -log(0.5) = log(2) ≈ 0.693
+        sym_loss = buselLossEngine.compute_dpo_loss(pc, pr, pc, pr, beta=0.1)
+        self.assertAlmostEqual(sym_loss.item(), math.log(2), places=4)
+        print(f"   ✅ random loss={loss.item():.4f}, symmetric loss={sym_loss.item():.4f} (≈ log 2 = {math.log(2):.4f})")
+
+    def test_dpo_sequence_logprob_respects_mask(self):
+        """🤖 [DPO-2] buselLossEngine.compute_sequence_logprob respects mask."""
+        print("🧪 [DPO-2] buselLossEngine.compute_sequence_logprob respects mask...")
+        torch.manual_seed(0)
+        V = 50
+        B, T = 2, 8
+        logits = torch.randn(B, T, V)
+        targets = torch.randint(0, V, (B, T))
+        mask = torch.zeros(B, T, dtype=torch.int32)
+        mask[0, 2:6] = 1  # 4 active positions
+        mask[1, :] = 1    # all 8 active
+        logp = buselLossEngine.compute_sequence_logprob(logits, targets, mask)
+        self.assertEqual(logp.shape, (B,))
+        # Manual: log_softmax + gather + sum over mask
+        ref_logp = torch.nn.functional.log_softmax(logits, dim=-1).gather(-1, targets.unsqueeze(-1).long()).squeeze(-1)
+        ref = (ref_logp * mask.float()).sum(dim=-1)
+        self.assertTrue(torch.allclose(logp, ref, atol=1e-5))
+        print(f"   ✅ per-seq logp[0]={logp[0].item():.3f}, logp[1]={logp[1].item():.3f}, matches manual calc.")
+
+    @unittest.skipUnless(HAS_SPECIAL_TOKENS, "special tokens required")
+    def test_dpo_dataloader_yields_4_tensors(self):
+        """🤖 [DPO-3] get_dpo_dataloader yields (chosen_b, chosen_m, rejected_b, rejected_m)."""
+        print("🧪 [DPO-3] get_dpo_dataloader yields 4-tensor batches with matching shapes...")
+        import tempfile
+        from data.dpo import get_dpo_dataloader
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write(json.dumps({"prompt": "Q1?", "chosen": "good", "rejected": "bad"}) + "\n")
+            f.write(json.dumps({"prompt": "Q2?", "chosen": "great", "rejected": "meh"}) + "\n")
+            tmp = f.name
+        try:
+            dl = get_dpo_dataloader([tmp], chunk_size=64, batch_size=2)
+            it = iter(dl)
+            batch = next(it)
+            self.assertEqual(len(batch), 4, "batch should be (chosen_b, chosen_m, rejected_b, rejected_m)")
+            cb, cm, rb, rm = batch
+            self.assertEqual(cb.shape, cm.shape)
+            self.assertEqual(rb.shape, rm.shape)
+            self.assertEqual(cb.shape, rb.shape, "chosen and rejected must have same shape")
+            print(f"   ✅ shapes: chosen={tuple(cb.shape)}, rejected={tuple(rb.shape)}")
+        finally:
+            os.unlink(tmp)
+
+    @unittest.skipUnless(HAS_TRAINING_STAGES, "stages required")
+    def test_dpo_config_from_profile(self):
+        """🤖 [DPO-4] buselDPOConfig.from_profile parses profile + stage_params."""
+        print("🧪 [DPO-4] buselDPOConfig.from_profile parses profile + stage_params...")
+        from training.stages.dpo import buselDPOConfig
+        profile = {
+            "model": {"d_model": 128, "n_layers": 3, "n_heads": 4, "vocab_size": 326, "n_hyper": 2},
+            "data": {"chunk_size": 256, "batch_size": 8},
+            "training": {"learning_rate_muon": 0.001, "learning_rate_adamw": 0.0001},
+        }
+        cfg = buselDPOConfig.from_profile(profile, {"beta": 0.2, "dpo_lr_scale": 0.05})
+        self.assertEqual(cfg.d_model, 128)
+        self.assertAlmostEqual(cfg.dpo_beta, 0.2, places=4)
+        # DPO LR is 0.05x the base
+        self.assertAlmostEqual(cfg.learning_rate_muon, 0.00005, places=7)
+        print(f"   ✅ DPOConfig: β={cfg.dpo_beta}, lr_muon={cfg.learning_rate_muon:.6f}")
+
+    # ════════════════════════════════════════════════════════════════════
+    #  PHASE 6 — EVAL (tools/eval.py + training/stages/eval.py)
+    # ════════════════════════════════════════════════════════════════════
+
+    @unittest.skipUnless(HAS_SPECIAL_TOKENS, "special tokens required")
+    def test_eval_perplexity_finite(self):
+        """🛰️ [EVAL-1] tools.eval.perplexity returns finite perplexity on tiny input."""
+        print("🧪 [EVAL-1] tools.eval.perplexity returns finite perplexity...")
+        from tools.eval import perplexity
+        # Fake model returning random logits
+        class FM:
+            def __call__(self, x, mtp, progress=0.0):
+                B, T, D = x.shape
+                return (torch.randn(B, T, 256), torch.zeros(B, T, 128), torch.zeros(B, T, 64), torch.zeros(B, T, 32)), torch.tensor(0.0)
+        class FP:
+            stride = 4
+            def __call__(self, x):
+                B, T = x.shape
+                return torch.randn(B, T // 4, 128)
+        result = perplexity(FM(), FP(), [list(b"hello world" * 8), list(b"good morning" * 4)], "cpu", max_samples=2)
+        self.assertIn("perplexity", result)
+        self.assertIn("bits_per_byte", result)
+        self.assertTrue(math.isfinite(result["perplexity"]), f"perplexity must be finite, got {result['perplexity']}")
+        self.assertGreater(result["perplexity"], 1.0, "random model perplexity should be > vocab baseline")
+        print(f"   ✅ perplexity={result['perplexity']:.2f}, bpb={result['bits_per_byte']:.3f}")
+
+    @unittest.skipUnless(HAS_SPECIAL_TOKENS, "special tokens required")
+    def test_eval_format_compliance_returns_valid_dict(self):
+        """🛰️ [EVAL-2] tools.eval.format_compliance returns valid dict with required keys."""
+        print("🧪 [EVAL-2] tools.eval.format_compliance returns valid dict...")
+        from tools.eval import format_compliance
+        class FM:
+            def __call__(self, x, mtp, progress=0.0):
+                B, T, D = x.shape
+                return (torch.randn(B, T, 256), torch.zeros(B, T, 128), torch.zeros(B, T, 64), torch.zeros(B, T, 32)), torch.tensor(0.0)
+        class FP:
+            stride = 4
+            def __call__(self, x):
+                B, T = x.shape
+                return torch.randn(B, max(1, T // 4), 128)
+        result = format_compliance(FM(), FP(), ["hello"], "cpu", max_prompts=1, max_new_tokens=8)
+        for k in ("format_compliance", "avg_response_bytes", "n_prompts"):
+            self.assertIn(k, result, f"missing key {k!r}")
+        self.assertEqual(result["n_prompts"], 1)
+        self.assertGreaterEqual(result["format_compliance"], 0.0)
+        self.assertLessEqual(result["format_compliance"], 1.0)
+        print(f"   ✅ compliance={result['format_compliance']:.2%}, avg_bytes={result['avg_response_bytes']:.1f}")
+
+    @unittest.skipUnless(HAS_SPECIAL_TOKENS, "special tokens required")
+    def test_eval_stages_all_registered(self):
+        """🛰️ [EVAL-3] All 4 pipeline stages (pretrain, sft, dpo, eval) are registered."""
+        print("🧪 [EVAL-3] All 4 pipeline stages registered...")
+        stages = list_stages()
+        for name in ("pretrain", "sft", "dpo", "eval"):
+            self.assertIn(name, stages, f"stage {name!r} not registered; got {stages}")
+        for name in ("pretrain", "sft", "dpo", "eval"):
+            self.assertTrue(is_stage_registered(name))
+        print(f"   ✅ registered stages: {sorted(stages)}")
+
+    # ════════════════════════════════════════════════════════════════════
+    #  PHASE 8 — PIPELINE YAMLs
+    # ════════════════════════════════════════════════════════════════════
+
+    @unittest.skipUnless(HAS_TRAINING_STAGES, "stages required")
+    def test_pipeline_full_yaml_loads(self):
+        """🛸 [PIPE-1] configs/pipelines/full.yaml loads with 4 stages."""
+        print("🧪 [PIPE-1] configs/pipelines/full.yaml loads with 4 stages...")
+        cfg = load_pipeline_yaml("configs/pipelines/full.yaml")
+        self.assertEqual(cfg.name, "full")
+        self.assertEqual(len(cfg.stages), 4)
+        self.assertEqual([s.name for s in cfg.stages], ["pretrain", "sft", "dpo", "eval"])
+        print(f"   ✅ pipeline={cfg.name!r}, stages={[s.name for s in cfg.stages]}")
+
+    @unittest.skipUnless(HAS_TRAINING_STAGES, "stages required")
+    def test_pipeline_quick_yaml_loads(self):
+        """🛸 [PIPE-2] configs/pipelines/quick.yaml loads with 2 stages."""
+        print("🧪 [PIPE-2] configs/pipelines/quick.yaml loads with 2 stages...")
+        cfg = load_pipeline_yaml("configs/pipelines/quick.yaml")
+        self.assertEqual(cfg.name, "quick")
+        self.assertEqual(len(cfg.stages), 2)
+        self.assertEqual([s.name for s in cfg.stages], ["pretrain", "eval"])
+        print(f"   ✅ pipeline={cfg.name!r}, stages={[s.name for s in cfg.stages]}")
 
 
 if __name__ == "__main__":

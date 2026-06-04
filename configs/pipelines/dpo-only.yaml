@@ -1,0 +1,21 @@
+name: dpo-only
+description: "Run DPO on top of an existing SFT checkpoint. Skips pretrain and SFT (use --start-stage=sft or --start-stage=dpo to resume)."
+
+stages:
+  - name: sft
+    data_preset: sft-shpak-chat
+    resume: "checkpoints/busel_shpak_SFT_FINAL.pt"
+    params:
+      data_glob: "data_train/sft/**/*.jsonl"
+      max_steps: 200
+      warmup_steps: 20
+      sft_lr_scale: 0.1
+
+  - name: dpo
+    data_preset: dpo-shpak
+    params:
+      data_glob: "data_train/dpo/**/*.jsonl"
+      max_steps: 200
+      warmup_steps: 15
+      beta: 0.1
+      dpo_lr_scale: 0.1

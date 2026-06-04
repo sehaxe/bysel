@@ -6,6 +6,110 @@ adheres to [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`).
 
 ---
 
+## [5.6.0] — 2026-06-04 — "Full Multi-Stage Framework" 🤖
+
+### Added
+
+- **`data/sft.py`** — Chat-format converter + SFT `IterableDataset`. Public
+  API: `format_chat_messages(messages)` returns `(bytes, loss_mask)`
+  using the special tokens (BOS, EOS, ROLE_SYSTEM, ROLE_USER,
+  ROLE_ASSISTANT, ROLE_TOOL). Mask is 1 only for assistant content +
+  assistant turn's final EOS. `format_dpo_pair(prompt, chosen, rejected)`
+  returns chosen + rejected byte sequences with shared prompt mask.
+  `get_sft_dataloader(...)` builds a packed-chunk DataLoader over a glob
+  of `{"messages": [...]}` JSONL files (sample packing; DOC_SEP between
+  examples; infinite wrap).
+- **`data/dpo.py`** — DPO `IterableDataset`. Public API:
+  `get_dpo_dataloader(...)` yields 4-tuples
+  `(chosen_b, chosen_m, rejected_b, rejected_m)`. Sample-packed; reads
+  `{"prompt", "chosen", "rejected"}` JSONL.
+- **`data/presets.py`** — Named catalog of 4 HF-backed data presets:
+  `sft-shpak-chat` (UltraChat 200k, 5k), `sft-shpak-code` (Magicoder
+  OSS Instruct 75k, 3k), `sft-shpak-tools` (xLAM function calling 60k,
+  3k), `dpo-shpak` (UltraFeedback binarized, 5k). Public API:
+  `list_presets(stage=None)`, `get_preset(name)`,
+  `resolve_preset(name, override_limit=None)`. Format adapter constants
+  `FMT_CHAT_MESSAGES`, `FMT_PROMPT_CHOSEN_REJECTED`,
+  `FMT_INSTRUCTION_INPUT_OUTPUT`, `FMT_CODE_PROBLEM_SOLUTION`,
+  `FMT_TOOL_CALL`.
+- **`training/stages/sft.py`** — `buselSFTStage` with `buselSFTConfig`.
+  Resumes from a pretrain checkpoint, uses `buselLossEngine.compute_sft_loss`
+  (masked CE on t+1 head, no MTP). Default LR is 0.3× the pretrain LR
+  (standard SFT recipe).
+- **`training/stages/dpo.py`** — `buselDPOStage` with `buselDPOConfig`.
+  Resumes from an SFT checkpoint, runs DPO with `β=0.1` (configurable).
+  Uses the same model for both policy and reference (computing reference
+  log-probs under `torch.no_grad()` + `model.eval()` to halve memory).
+  Tracks `accuracy = (β·(π_chosen - π_rejected) - (ref_chosen - ref_rejected) > 0)`
+  as a side metric.
+- **`training/stages/eval.py`** — `buselEvalStage` with `buselEvalConfig`.
+  Loads a checkpoint, runs all eval metrics, stashes the result dict
+  in `state.artifact` for downstream consumers.
+- **`tools/eval.py`** — 4 cheap eval metrics: `perplexity` (next-byte CE
+  on raw bytes), `sft_loss_metric` (masked CE on chat-formatted data),
+  `format_compliance` (greedy-decodes N prompts, checks for valid
+  byte-range output), and `run_all_metrics(...)` aggregator. Default
+  eval prompts and bytes samples are bundled.
+- **`tools/data_manager.py`** — `_hf_row_to_sft_jsonl` converter for
+  5 format adapters (chat_messages, prompt_chosen_rejected,
+  instruction_input_output, code_problem_solution, tool_call). New
+  Typer commands: `download-preset` (`--name`, `--limit`, `--output`)
+  and `list-presets` (`--stage`).
+- **`tools/tool_executor.py`** — Standalone tool-call parser + executor
+  (Anthropic XML envelope `<function_calls><invoke name="X">...</invoke></function_calls>`).
+  Default `ToolRegistry` exposes `TOOL_BASH` (sandboxed subprocess, 10s
+  timeout, 8KB cap) and `TOOL_READ` (32KB cap). NOT YET integrated with
+  the REPL; available for future tool-aware inference work.
+- **`configs/pipelines/full.yaml`** — 4-stage pipeline: pretrain → SFT →
+  DPO → eval.
+- **`configs/pipelines/quick.yaml`** — 2-stage smoke pipeline: pretrain
+  (chyzh, 50 steps) → eval.
+- **`configs/pipelines/dpo-only.yaml`** — 2-stage pipeline: SFT (resumed)
+  → DPO. For users who already have an SFT checkpoint.
+- **`tools/orchestrator.py:pipeline`** — Refactored to use a uniform
+  `setup(profile, profile_name, resume, stage_params)` signature for ALL
+  stages (no more special-cased pretrain branch). Auto-chains
+  `state.last_checkpoint_path` between stages when no explicit
+  `stage_spec.resume` is set.
+- **`training/recipe.py:buselLossEngine`** — Added
+  `compute_dpo_loss(policy_chosen_logps, policy_rejected_logps,
+  reference_chosen_logps, reference_rejected_logps, beta=0.1)`
+  (Rafailov et al. 2023 DPO loss) and
+  `compute_sequence_logprob(logits, targets, mask)` helper.
+- **`cli.py`** — Registered `download-preset` and `list-presets`
+  subcommands.
+- **14 new tests** in `tests/test_suite.py` (SFT-1..5, DPO-1..4, EVAL-1..3,
+  PIPE-1..2). Total: 119/119 passing.
+
+### Changed
+
+- **`tools/inference.py`** — Removed `--prompt`, `--batch`, `--output`,
+  `--eval`, `--non-interactive`, `--max-new-tokens`, `--temperature`,
+  `--top-p`, `--repetition-penalty` flags. REPL is now the only mode
+  and the default. The other modes (one-shot, batch, eval) were
+  redundant with the REPL; users can use the REPL to test prompts
+  interactively. Stage flags removed per user request "зачем в инференсе
+  режим репл пусть убдет один дефолтный другой удари" (REPL is the
+  default, delete the other modes).
+
+### Notes
+
+- **DPO design choice:** the policy and reference share the same model
+  instance; reference log-probs are computed with `torch.no_grad()`.
+  Memory cost ≈ 1× model (not 2×). This is the standard simplification
+  when the reference = SFT model = policy at the start of DPO.
+- **REPL mode is the only inference mode.** No `--repl` flag, no
+  `--prompt` flag, no batch mode. Interactive by default; users pipe
+  prompts via stdin if they need non-interactive use.
+- **`tools/tool_executor.py` is standalone** — not yet wired into
+  `tools/inference.py`. Future work: integrate with the REPL to detect
+  `<function_calls>` envelopes, execute them via `ToolRegistry`, and
+  inject the results back into the conversation.
+- **No hand-crafted data.** All 4 presets point at HF datasets; no
+  generator scripts, no synthetic examples.
+
+---
+
 ## [5.5.0] — 2026-06-04 — "Stage Framework Foundation" 🛸
 
 ### Added

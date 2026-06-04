@@ -19,6 +19,9 @@ from training.stages.base import (
 )
 
 from training.stages import pretrain as _pretrain_module  # noqa: F401  (triggers @register_stage)
+from training.stages import sft as _sft_module  # noqa: F401  (triggers @register_stage)
+from training.stages import dpo as _dpo_module  # noqa: F401  (triggers @register_stage)
+from training.stages import eval as _eval_module  # noqa: F401  (triggers @register_stage)
 
 __all__ = [
     "BaseStage",
