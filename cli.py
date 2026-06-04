@@ -1,12 +1,12 @@
 """
 ╔═══════════════════════════════════════════════════════════════════════════╗
-║                            BUSEL OMNI-LLM v4.1                            ║
+║                            BUSEL OMNI-LLM v5.5                            ║
 ║                 Sovereign 1-bit Any-to-Text AI Framework                  ║
 ╚═══════════════════════════════════════════════════════════════════════════╝
 """
 import typer
 from tools.data_manager import download_all, download_vision, download_text, download_sft, label_vision, download_multimodal
-from tools.orchestrator import autopilot, train, profile
+from tools.orchestrator import autopilot, train, profile, pipeline
 
 app = typer.Typer(
     help="busel Master CLI Engine - Sovereign 1-bit Omni-LLM",
@@ -23,7 +23,8 @@ app.command(name="label-vision", help="🤖 Auto-label a local directory of imag
 
 # 🚀 Регистрация команд обучения и сервисов
 app.command(name="autopilot", help="🛸 ULTIMATE ONE-CLICK AUTOPILOT: Verifies env, downloads data, profiles hardware, and launches training.")(autopilot)
-app.command(name="train", help="🔥 Manually start the core training loop.")(train)
+app.command(name="train", help="🔥 Manually start the core training loop (single-stage, legacy).")(train)
+app.command(name="pipeline", help="🛸 Run a multi-stage training pipeline (configs/pipelines/<name>.yaml).")(pipeline)
 app.command(name="profile", help="📊 Run the ultra-stable step-by-step performance profiler (v2.0) on Mac/CUDA.")(profile)
 
 # 💬 НОВАЯ КОМАНДА: Локальный интерактивный чат

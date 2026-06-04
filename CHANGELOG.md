@@ -6,6 +6,106 @@ adheres to [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`).
 
 ---
 
+## [5.5.0] — 2026-06-04 — "Stage Framework Foundation" 🛸
+
+### Added
+
+- **`training/stages/` module** — plug-in multi-stage training pipeline
+  framework. Stages are registered via `@register_stage("name")` (a new
+  `busel_registry` kind) and implement the `BaseStage` Protocol
+  (`setup(cfg) → run(state) → finalize(state)`).
+  - `training/stages/__init__.py` — public API exports; eagerly imports
+    `pretrain` to trigger registration on package import
+  - `training/stages/base.py` — `BaseStage` Protocol, `StageState`/
+    `StageSpec`/`PipelineConfig` dataclasses, `register_stage` decorator,
+    `load_pipeline_yaml()` validator (rejects unknown stage names,
+    missing keys, malformed shapes)
+  - `training/stages/pretrain.py` — `buselPretrainStage` extracted from
+    `train.py:main()`. Behavior is preserved 1:1 (chinchilla planner,
+    curriculum warmup, autopilot, gradient checkpointing, torch.compile,
+    MTP-4 targets, scheduled checkpoints, final checkpoint, SIGINT
+    emergency save). `buselPretrainConfig.from_profile()` parses a
+    YAML profile dict.
+- **`configs/pipelines/pretrain-only.yaml`** — minimal 1-stage pipeline
+  preset equivalent to `uv run train.py --profile shpak`. Shows the
+  pipeline YAML schema (`name` + `stages[]` + optional `global_params`).
+- **`cli.py pipeline` subcommand** — new Typer entrypoint that runs a
+  multi-stage pipeline. Loads YAML from `configs/pipelines/<name>.yaml`,
+  instantiates stages via `get_stage(name)`, calls `setup → run →
+  finalize` in order. Supports `--start-stage` to resume mid-pipeline
+  and `--config-dir` to override the preset path. Logs `pipeline_start`/
+  `stage_start`/`stage_complete`/`pipeline_complete` events to
+  `checkpoints/busel.log.jsonl`.
+- **`busel_registry.register("stage", name)`** — new registry kind
+  alongside the existing `attention`/`optimizer`/`encoder` kinds.
+  `get_stage("pretrain")`, `list_stages()`, `is_stage_registered(name)`
+  are the public read API.
+- **14 new tests** in `tests/test_suite.py` (prefix `STG-1` … `STG-14`):
+  registration, retrieval, unknown-stage rejection, lifecycle methods,
+  config parsing (valid + 2 invalid shapes), YAML loading
+  (valid/missing/unknown-stage/4 missing-key shapes), dataclass fields,
+  orchestrator command import. All guarded by `HAS_TRAINING_STAGES` so
+  they degrade gracefully on broken imports.
+- **2 existing tests fixed** — `test_registry_decorator_basic`,
+  `test_registry_collision_raises`, `test_registry_override_allowed`
+  no longer call `clear_registry()` (which was wiping production
+  entries needed by later tests). They now use `unregister(test_kind,
+  name)` for surgical cleanup of their own namespace.
+
+### Changed
+
+- **`tools/orchestrator.py`** — added `pipeline(name, start_stage,
+  config_dir)` Typer command. Kept the legacy `train`/`autopilot`/
+  `profile` commands unchanged.
+- **`cli.py`** — registered `pipeline` subcommand; bumped module
+  docstring from v4.1 to v5.5.
+- **`training/AGENTS.md`** — added a complete section on `stages/`
+  (STRUCTURE, WHERE TO LOOK, KEY CLASSES, CONVENTIONS, ANTI-PATTERNS,
+  NOTES), including the eager-import-in-`__init__.py` pattern that
+  triggers `@register_stage` registration on package import.
+- **`tools/AGENTS.md`** — documented the new `pipeline` command,
+  pipeline YAML schema, and the connection to `training/stages/`.
+
+### Backward Compatibility
+
+- **`train.py` is UNCHANGED.** Users can run `uv run train.py --profile
+  shpak` (legacy) OR `uv run cli.py pipeline --name pretrain-only`
+  (new); both produce equivalent checkpoints. The `train.py` → stage
+  migration is a separate PR.
+
+### Anti-patterns (do not violate — new for 5.5.0)
+
+- **NEVER** import `train.py` from `stages/` — `buselPretrainStage` is
+  the new canonical interface. The legacy `train.py` stays untouched.
+- **NEVER** register a stage in a runtime-loaded module without
+  re-triggering `__init__.py` — the registry is populated only at
+  import time. New stages MUST add their module import to
+  `training/stages/__init__.py` to be discoverable.
+- **NEVER** swallow `KeyError` from `get_stage()` in production — the
+  orchestrator treats it as a hard config error.
+- **NEVER** use `clear_registry()` in tests that don't own the entire
+  registry state — it wipes production entries (`gdn2`, `mla`, `muon`,
+  `hybrid_muon_adamw`, `pretrain`) needed by later tests. Use
+  `unregister(kind, name)` for surgical cleanup instead.
+
+### Performance
+
+No regression. `buselPretrainStage` is a refactor of `train.py:main()`,
+not a new implementation — same training loop, same optimizer, same
+checkpoint format. End-to-end benchmark on RTX 5060 Ti (shpak profile,
+200 steps): same tok/s as 5.4.0.
+
+### Roadmap (v5.6+)
+
+- **v5.6** — SFT stage + HF dataset downloader
+- **v5.7** — DPO stage + safety/honesty/critical-thinking data
+- **v5.8** — Eval stage (perplexity, code, format, honesty probes)
+- **v5.9** — REPL stage (chat template, streaming, tool loop)
+- **v6.0** — Full pipeline preset (`configs/pipelines/full.yaml`)
+  + `train.py` deprecation
+
+---
+
 ## [5.4.0] — 2026-06-04 — "Sovereign 70-token Vocabulary" 🛸
 
 ### Added

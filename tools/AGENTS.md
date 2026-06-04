@@ -1,11 +1,11 @@
 # tools/ — CLI, Data Manager, Orchestrator
 
-**Scope:** User-facing entrypoints (Typer CLI), dataset management, training orchestration, plotting, standalone inference.
+**Scope:** User-facing entrypoints (Typer CLI), dataset management, training orchestration, plotting, standalone inference, **v5.5 multi-stage pipeline runner**.
 
 ## STRUCTURE
 ```
 tools/
-├── orchestrator.py    # Typer: autopilot/train/profile (all shell out via subprocess)
+├── orchestrator.py    # Typer: autopilot/train/profile/**pipeline** (all shell out via subprocess)
 ├── data_manager.py    # Typer: download-all/-vision/-text/-sft, label-vision (HF datasets, COCO)
 ├── inference.py       # Standalone CLI chat (subprocess entry from cli.py chat)
 └── plotter.py         # matplotlib loss/lr/metrics visualization
@@ -19,6 +19,8 @@ tools/
 | Change auto-download behavior | `tools/orchestrator.py:autopilot` | Downloads if `data_train/` empty; profiles HW first |
 | Add plot type | `tools/plotter.py` | Reads `checkpoints/metrics.jsonl` |
 | Standalone inference | `tools/inference.py` | Checkpoint-first, profile-fallback config loading |
+| **Add a new pipeline preset** | `configs/pipelines/<name>.yaml` | Read by `pipeline()` command below |
+| **Change pipeline orchestration** | `tools/orchestrator.py:pipeline` | Loads YAML, instantiates stages via `get_stage()`, calls `setup → run → finalize` |
 
 ## KEY FUNCTIONS
 | Symbol | Type | Location | Role |
@@ -26,6 +28,7 @@ tools/
 | `autopilot` | Typer command | orchestrator.py | One-click: load .env → ensure data → profile HW → launch train.py |
 | `train` | Typer command | orchestrator.py | Shell-out: `python train.py --profile X [--resume Y]` |
 | `profile` | Typer command | orchestrator.py | Shell-out: `python tests/profiler_run.py` |
+| `pipeline` | Typer command | orchestrator.py | **🆕 v5.5** — runs a multi-stage pipeline from `configs/pipelines/<name>.yaml`. Loads YAML, instantiates each stage via `get_stage(name)`, runs `setup → run → finalize` in order, logs `pipeline_start`/`stage_start`/`stage_complete`/`pipeline_complete` events to `checkpoints/busel.log.jsonl`. Supports `--start-stage` to resume mid-pipeline. |
 | `load_env` | function | orchestrator.py | `.env` file parser (no dotenv lib) |
 | `download_all`/`-text`/`-sft`/`-vision` | Typer command | data_manager.py | HF streaming → Parquet/JSONL in `data_train/` |
 | `label_vision` | Typer command | data_manager.py | Auto-label local image dir via local Ollama vision model |

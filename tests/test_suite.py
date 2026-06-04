@@ -82,6 +82,22 @@ try:
 except Exception:
     HAS_SPECIAL_TOKENS = False
 
+try:
+    from training.stages import (
+        BaseStage,
+        StageState,
+        StageSpec,
+        PipelineConfig,
+        register_stage,
+        get_stage,
+        list_stages,
+        is_stage_registered,
+        load_pipeline_yaml,
+    )
+    HAS_TRAINING_STAGES = True
+except Exception:
+    HAS_TRAINING_STAGES = False
+
 
 class _MockConfig:
     def __init__(self, **kw):
@@ -697,7 +713,7 @@ class TestbuselFramework(unittest.TestCase):
     def test_registry_decorator_basic(self):
         """🛸 busel REGISTRY — basic @register/get/is_registered/list_registered."""
         print("🧪 [REG-1] busel Registry — basic register/get API...")
-        clear_registry()
+        unregister("test_kind", "demo_cls")
         try:
             @register("test_kind", "demo_cls")
             class _Demo:
@@ -714,7 +730,7 @@ class TestbuselFramework(unittest.TestCase):
     def test_registry_collision_raises(self):
         """🛸 busel REGISTRY — duplicate (kind, name) without override raises KeyError."""
         print("🧪 [REG-2] busel Registry — collision detection...")
-        clear_registry()
+        unregister("test_kind", "dup")
         try:
             @register("test_kind", "dup")
             class _A:
@@ -736,7 +752,7 @@ class TestbuselFramework(unittest.TestCase):
     def test_registry_override_allowed(self):
         """🛸 busel REGISTRY — override=True replaces existing entry."""
         print("🧪 [REG-3] busel Registry — override=True works...")
-        clear_registry()
+        unregister("test_kind", "ovr")
         try:
             @register("test_kind", "ovr")
             class _First:
@@ -1519,6 +1535,220 @@ class TestbuselFramework(unittest.TestCase):
         model = buselModel(cfg_ok)
         self.assertEqual(model.vocab_size, registry_v)
         print(f"   ✅ buselModel rejects vocab_size={undersized} (< registry {registry_v}); accepts {registry_v}.")
+
+    @unittest.skipUnless(HAS_TRAINING_STAGES, "training.stages unavailable")
+    def test_stages_pretrain_registered(self):
+        """🛸 [STG-1] busel stages — `pretrain` is registered on package import."""
+        print("🧪 [STG-1] busel stages — `pretrain` is registered on package import...")
+        from training.stages import list_stages
+        names = list_stages()
+        self.assertIn("pretrain", names, f"pretrain must be in list_stages(), got {names}")
+        self.assertIsInstance(names, list, "list_stages() must return a list")
+        self.assertEqual(names, sorted(names), "list_stages() must return sorted list")
+        print(f"   ✅ list_stages() = {names}.")
+
+    @unittest.skipUnless(HAS_TRAINING_STAGES, "training.stages unavailable")
+    def test_stages_get_pretrain(self):
+        """🛸 [STG-2] busel stages — get_stage('pretrain') returns buselPretrainStage class."""
+        print("🧪 [STG-2] busel stages — get_stage('pretrain') returns buselPretrainStage class...")
+        from training.stages import get_stage
+        cls = get_stage("pretrain")
+        self.assertEqual(cls.__name__, "buselPretrainStage")
+        self.assertEqual(cls.name, "pretrain")
+        print(f"   ✅ get_stage('pretrain') = {cls.__module__}.{cls.__name__} (name={cls.name}).")
+
+    @unittest.skipUnless(HAS_TRAINING_STAGES, "training.stages unavailable")
+    def test_stages_unknown_raises(self):
+        """🛸 [STG-3] busel stages — get_stage('nonexistent') raises KeyError."""
+        print("🧪 [STG-3] busel stages — get_stage('nonexistent') raises KeyError...")
+        from training.stages import get_stage
+        with self.assertRaises(KeyError, msg="get_stage must reject unknown names"):
+            get_stage("definitely_not_a_registered_stage_xyz")
+        print("   ✅ get_stage('nonexistent_xyz') correctly raises KeyError.")
+
+    @unittest.skipUnless(HAS_TRAINING_STAGES, "training.stages unavailable")
+    def test_stages_pretrain_has_lifecycle(self):
+        """🛸 [STG-4] busel stages — buselPretrainStage has setup, run, finalize methods."""
+        print("🧪 [STG-4] busel stages — buselPretrainStage has setup/run/finalize...")
+        from training.stages import get_stage
+        cls = get_stage("pretrain")
+        for method_name in ("setup", "run", "finalize"):
+            self.assertTrue(
+                callable(getattr(cls, method_name, None)),
+                f"buselPretrainStage must define {method_name}()",
+            )
+        instance = cls()
+        for method_name in ("setup", "run", "finalize"):
+            self.assertTrue(
+                callable(getattr(instance, method_name, None)),
+                f"buselPretrainStage instance must have {method_name}()",
+            )
+        print("   ✅ buselPretrainStage defines setup, run, finalize (instance-level callable).")
+
+    @unittest.skipUnless(HAS_TRAINING_STAGES, "training.stages unavailable")
+    def test_stages_pretrain_config_from_profile(self):
+        """🛸 [STG-5] busel stages — buselPretrainConfig.from_profile parses YAML profile dict."""
+        print("🧪 [STG-5] busel stages — buselPretrainConfig.from_profile parses profile dict...")
+        from training.stages.pretrain import buselPretrainConfig
+        profile = {
+            "model": {"d_model": 128, "n_layers": 3, "n_heads": 4, "vocab_size": 326, "n_hyper": 2},
+            "data": {"data_path": "data_train", "chunk_size": 256, "batch_size": 16},
+            "training": {"max_steps": 100, "warmup_steps": 10, "min_lr_ratio": 0.1,
+                         "learning_rate_muon": 0.001, "learning_rate_adamw": 0.0001,
+                         "weight_decay": 0.1, "grad_accum_steps": 1},
+        }
+        cfg = buselPretrainConfig.from_profile(profile)
+        self.assertEqual(cfg.d_model, 128)
+        self.assertEqual(cfg.n_layers, 3)
+        self.assertEqual(cfg.vocab_size, 326)
+        self.assertEqual(cfg.max_steps, 100)
+        self.assertEqual(cfg.warmup_steps, 10)
+        self.assertEqual(cfg.data_path, "data_train")
+        print(f"   ✅ buselPretrainConfig.from_profile: d_model={cfg.d_model}, n_layers={cfg.n_layers}, vocab={cfg.vocab_size}.")
+
+    @unittest.skipUnless(HAS_TRAINING_STAGES, "training.stages unavailable")
+    def test_stages_pretrain_config_rejects_bad_dmodel(self):
+        """🛸 [STG-6] busel stages — buselPretrainConfig rejects d_model not divisible by n_heads."""
+        print("🧪 [STG-6] busel stages — buselPretrainConfig rejects invalid d_model/n_heads...")
+        from training.stages.pretrain import buselPretrainConfig
+        bad_profile = {
+            "model": {"d_model": 100, "n_layers": 3, "n_heads": 3, "vocab_size": 326, "n_hyper": 2},
+            "data": {"data_path": "data_train", "chunk_size": 256, "batch_size": 16},
+            "training": {"max_steps": 10, "warmup_steps": 1, "min_lr_ratio": 0.1,
+                         "learning_rate_muon": 0.001, "learning_rate_adamw": 0.0001,
+                         "weight_decay": 0.1, "grad_accum_steps": 1},
+        }
+        with self.assertRaises(ValueError, msg="must reject d_model not divisible by n_heads"):
+            buselPretrainConfig.from_profile(bad_profile)
+        print("   ✅ buselPretrainConfig rejects d_model=100 with n_heads=3 (100 % 3 != 0).")
+
+    @unittest.skipUnless(HAS_TRAINING_STAGES, "training.stages unavailable")
+    def test_stages_load_pretrain_only_yaml(self):
+        """🛸 [STG-7] busel stages — load_pipeline_yaml('configs/pipelines/pretrain-only.yaml') succeeds."""
+        print("🧪 [STG-7] busel stages — load_pipeline_yaml('pretrain-only.yaml') succeeds...")
+        from training.stages import load_pipeline_yaml
+        cfg = load_pipeline_yaml("configs/pipelines/pretrain-only.yaml")
+        self.assertEqual(cfg.name, "pretrain-only")
+        self.assertEqual(len(cfg.stages), 1)
+        s0 = cfg.stages[0]
+        self.assertEqual(s0.name, "pretrain")
+        self.assertEqual(s0.data_preset, "shpak")
+        self.assertEqual(s0.params.get("profile_name"), "shpak")
+        self.assertEqual(s0.params.get("max_steps"), 200)
+        print(f"   ✅ pretrain-only.yaml: name={cfg.name}, stages=[{s0.name}], max_steps={s0.params.get('max_steps')}.")
+
+    @unittest.skipUnless(HAS_TRAINING_STAGES, "training.stages unavailable")
+    def test_stages_load_missing_yaml_raises(self):
+        """🛸 [STG-8] busel stages — load_pipeline_yaml raises FileNotFoundError on missing file."""
+        print("🧪 [STG-8] busel stages — load_pipeline_yaml raises FileNotFoundError on missing file...")
+        from training.stages import load_pipeline_yaml
+        with self.assertRaises(FileNotFoundError):
+            load_pipeline_yaml("configs/pipelines/this_does_not_exist.yaml")
+        print("   ✅ load_pipeline_yaml on missing file raises FileNotFoundError.")
+
+    @unittest.skipUnless(HAS_TRAINING_STAGES, "training.stages unavailable")
+    def test_stages_load_unknown_stage_raises(self):
+        """🛸 [STG-9] busel stages — load_pipeline_yaml raises ValueError on unknown stage name."""
+        print("🧪 [STG-9] busel stages — load_pipeline_yaml rejects unknown stage names...")
+        import tempfile
+        import os
+        from training.stages import load_pipeline_yaml
+        with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
+            f.write("name: bad\nstages:\n  - name: this_stage_is_not_registered_xyz\n")
+            tmp_path = f.name
+        try:
+            with self.assertRaises(ValueError, msg="must reject unregistered stage names"):
+                load_pipeline_yaml(tmp_path)
+        finally:
+            os.unlink(tmp_path)
+        print("   ✅ load_pipeline_yaml with unknown stage name raises ValueError.")
+
+    @unittest.skipUnless(HAS_TRAINING_STAGES, "training.stages unavailable")
+    def test_stages_load_missing_keys_raises(self):
+        """🛸 [STG-10] busel stages — load_pipeline_yaml rejects YAML missing required keys."""
+        print("🧪 [STG-10] busel stages — load_pipeline_yaml rejects missing required keys...")
+        import tempfile
+        import os
+        from training.stages import load_pipeline_yaml
+        for body, missing in [
+            ("stages:\n  - name: pretrain\n", "name"),
+            ("name: x\n", "stages"),
+            ("name: x\nstages: bad\n", "stages-must-be-list"),
+            ("name: x\nstages: []\n", "stages-must-be-non-empty"),
+        ]:
+            with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
+                f.write(body)
+                tmp = f.name
+            try:
+                with self.assertRaises((KeyError, ValueError), msg=f"missing={missing}"):
+                    load_pipeline_yaml(tmp)
+            finally:
+                os.unlink(tmp)
+        print("   ✅ load_pipeline_yaml rejects all 4 missing-key shapes (KeyError or ValueError).")
+
+    @unittest.skipUnless(HAS_TRAINING_STAGES, "training.stages unavailable")
+    def test_stages_stage_state_defaults(self):
+        """🛸 [STG-11] busel stages — StageState has the documented default field values."""
+        print("🧪 [STG-11] busel stages — StageState defaults match the docstring contract...")
+        from training.stages import StageState
+        s = StageState()
+        self.assertEqual(s.step, 0)
+        self.assertEqual(s.epoch, 0)
+        self.assertEqual(s.best_loss, float("inf"))
+        self.assertEqual(s.metrics, {})
+        self.assertIsNone(s.last_checkpoint_path)
+        self.assertIsNone(s.artifact)
+        s.step = 42
+        s.metrics["loss"] = 1.23
+        self.assertEqual(s.step, 42)
+        self.assertEqual(s.metrics["loss"], 1.23)
+        print("   ✅ StageState: step=0, epoch=0, best_loss=inf, metrics={}, ckpt=None, artifact=None.")
+
+    @unittest.skipUnless(HAS_TRAINING_STAGES, "training.stages unavailable")
+    def test_stages_stage_spec_dataclass(self):
+        """🛸 [STG-12] busel stages — StageSpec accepts the documented field set."""
+        print("🧪 [STG-12] busel stages — StageSpec accepts name/data_preset/resume/params...")
+        from training.stages import StageSpec
+        s = StageSpec(
+            name="pretrain",
+            data_preset="shpak",
+            resume="checkpoints/x.pt",
+            checkpoint_out="checkpoints/y.pt",
+            params={"max_steps": 100},
+        )
+        self.assertEqual(s.name, "pretrain")
+        self.assertEqual(s.data_preset, "shpak")
+        self.assertEqual(s.resume, "checkpoints/x.pt")
+        self.assertEqual(s.checkpoint_out, "checkpoints/y.pt")
+        self.assertEqual(s.params["max_steps"], 100)
+        print("   ✅ StageSpec accepts all 5 documented fields.")
+
+    @unittest.skipUnless(HAS_TRAINING_STAGES, "training.stages unavailable")
+    def test_stages_pipeline_config_dataclass(self):
+        """🛸 [STG-13] busel stages — PipelineConfig accepts the documented field set."""
+        print("🧪 [STG-13] busel stages — PipelineConfig accepts name/stages/global_params...")
+        from training.stages import PipelineConfig, StageSpec
+        cfg = PipelineConfig(
+            name="full",
+            stages=[StageSpec(name="pretrain")],
+            global_params={"max_steps": 200},
+        )
+        self.assertEqual(cfg.name, "full")
+        self.assertEqual(len(cfg.stages), 1)
+        self.assertEqual(cfg.stages[0].name, "pretrain")
+        self.assertEqual(cfg.global_params["max_steps"], 200)
+        print("   ✅ PipelineConfig accepts all 3 documented fields.")
+
+    @unittest.skipUnless(HAS_TRAINING_STAGES, "training.stages unavailable")
+    def test_stages_orchestrator_pipeline_command_registered(self):
+        """🛸 [STG-14] busel stages — tools.orchestrator:pipeline is exported and importable."""
+        print("🧪 [STG-14] busel stages — tools.orchestrator:pipeline is importable...")
+        from tools.orchestrator import pipeline
+        self.assertTrue(callable(pipeline), "tools.orchestrator.pipeline must be callable")
+        # Typer commands expose a `.callback` attribute; the function itself should
+        # also have a __name__.
+        self.assertEqual(pipeline.__name__, "pipeline")
+        print(f"   ✅ tools.orchestrator.pipeline exists, callable, name='{pipeline.__name__}'.")
 
 
 if __name__ == "__main__":

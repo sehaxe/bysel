@@ -1,0 +1,10 @@
+name: pretrain-only
+stages:
+  - name: pretrain
+    data_preset: shpak
+    checkpoint_out: checkpoints/busel_pretrain_FINAL.pt
+    params:
+      profile_name: shpak
+      max_steps: 200
+      warmup_steps: 10
+global_params: {}

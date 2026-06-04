@@ -1,13 +1,17 @@
-# training/ — Optimizer, AutoPilot, Loss
+# training/ — Optimizer, AutoPilot, Loss, **Stage Framework**
 
-**Scope:** Hybrid Muon+AdamW, predictive AutoPilot v6.0, MTP-4 weighted loss engine.
+**Scope:** Hybrid Muon+AdamW, predictive AutoPilot v6.0, MTP-4 weighted loss engine, **v5.5 multi-stage pipeline framework**.
 
 ## STRUCTURE
 ```
 training/
 ├── optimizer.py    # Muon (Newton-Schulz ×5), buselOptimizerEngine (hybrid Muon+AdamW)
 ├── autopilot.py    # buselAutoPilot v6.0 — predictive dampening, adaptive AGC, dynamic WD
-└── recipe.py       # buselLossEngine — pretrain (MTP-4 weighted), SFT, KTO losses
+├── recipe.py       # buselLossEngine — pretrain (MTP-4 weighted), SFT, KTO losses
+└── stages/         # 🛸 v5.5 NEW — multi-stage pipeline framework
+    ├── __init__.py  # Public API exports; eager-imports stage modules
+    ├── base.py      # BaseStage Protocol, StageState/StageSpec/PipelineConfig, register_stage, load_pipeline_yaml
+    └── pretrain.py  # buselPretrainStage — pretrain stage (extracted from train.py:main)
 ```
 
 ## WHERE TO LOOK
@@ -19,6 +23,9 @@ training/
 | Add loss term | `recipe.py` | `compute_pretrain_loss` already handles MTP-4 weighted sum |
 | Change dampening | `autopilot.py` line ~50 | 3σ rule on last 15 grad norms (predictive) |
 | Switch to FlashMuon | `optimizer.py` line ~9 | Auto-uses `flash_muon.Muon` if `torch.cuda.is_available()` |
+| **Add a new stage** | `stages/<name>.py` → `@register_stage("<name>")` class | Auto-discovered; `__init__.py` eager-imports for registration |
+| **Define a pipeline** | `configs/pipelines/<name>.yaml` | Read by `tools/orchestrator.py:pipeline()` |
+| **Change stage protocol** | `stages/base.py` → `BaseStage` | Has `setup/run/finalize`; `StageState` is shared state across stages |
 
 ## KEY CLASSES
 | Symbol | Type | Location | Role |
@@ -30,6 +37,14 @@ training/
 | `buselAutoPilot` | class | autopilot.py | Wraps engine; tracks loss/grad history; recovery countdown |
 | `buselLossEngine` | class | recipe.py | Liger-CE on CUDA; vanilla F.cross_entropy elsewhere; MTP weights [0.5, 0.25, 0.125] |
 | `validate_training_schedule` | function | recipe.py | Runtime guard for `max_steps > warmup_steps` and `warmup >= 1` (ISSUES.md #7); called from `train.py` after auto-planning |
+| `BaseStage` | Protocol | stages/base.py | Stage lifecycle contract: `setup(cfg)` → `run(state)` → `finalize(state)` |
+| `StageState` | dataclass | stages/base.py | Shared mutable state between stages: `step`, `epoch`, `best_loss`, `metrics`, `last_checkpoint_path`, `artifact` |
+| `StageSpec` | dataclass | stages/base.py | One entry in a pipeline YAML: `name`, `data_preset`, `resume`, `checkpoint_out`, `params` |
+| `PipelineConfig` | dataclass | stages/base.py | Top-level pipeline: `name`, `stages`, `global_params` |
+| `register_stage(name)` | decorator | stages/base.py | Wraps `busel_registry.register("stage", name)`; auto-registered on import |
+| `load_pipeline_yaml(path)` | function | stages/base.py | Validates YAML shape: `name` + non-empty `stages[]`; rejects unknown stage names; raises `FileNotFoundError`/`ValueError` |
+| `buselPretrainStage` | class | stages/pretrain.py | First stage of the pipeline. Calls `setup()` to build model+optim+dataloader, `run()` to execute the training loop, `finalize()` to save the final checkpoint. Behavior is preserved 1:1 with `train.py:main()`. |
+| `buselPretrainConfig` | dataclass | stages/pretrain.py | Subset of `configs/default.yaml` profile keys; constructed via `from_profile(profile_dict)`. |
 
 ## CONVENTIONS
 - **Param routing rule:** `param.ndim == 2 and "router" not in name and "embed" not in name` → Muon
@@ -46,6 +61,9 @@ training/
 - **LR cosine:** `min_lr_ratio + (1-min_lr_ratio) × 0.5 × (1+cos(π·progress))` after warmup
 - **Weight decay curve:** `wd_factor = 0.1` warmup, `0.1 + 0.9·progress` mid, `0.5` last 10%
 - **Liger kernel:** Only if `HAS_LIGER` and CUDA; `liger_cross_entropy` for CE/MTP
+- **Stage registration:** Put a class with `@register_stage("name")` in `stages/<name>.py`; the `__init__.py` already does `from training.stages import pretrain as _pretrain_module` to trigger registration on package import (otherwise the registry is empty and the orchestrator raises `KeyError`)
+- **Pipeline YAML schema:** Top-level: `name` (string, required), `stages` (list, non-empty, required), `global_params` (dict, optional, applied to every stage). Per-stage: `name` (must be registered), `data_preset` (string|null), `resume` (string|null), `checkpoint_out` (string|null), `params` (dict, freeform, merged with `global_params`)
+- **Stage state contract:** Stages receive a `StageState` instance on every call; they may read+mutate fields to pass data to the next stage. `StageState.artifact` is the convention for passing a checkpoint path or other large result.
 
 ## ANTI-PATTERNS
 - **NEVER** apply Muon to 1D params (norms, biases) — `buselOptimizerEngine` filters them
@@ -58,6 +76,9 @@ training/
 - **NEVER** skip `stabilization_factor *= lr_factor` — it's multiplicative w/ cosine schedule
 - **NEVER** call `state['momentum_buffer'].to(p.dtype)` — kept in `bf16`/`fp16`/`fp32` per device
 - **NEVER** save KTO labels as float — must be `0` or `1` (integer label)
+- **NEVER** import `train.py` from `stages/` — `buselPretrainStage` is the new canonical interface; the legacy `train.py` stays untouched for backward compat
+- **NEVER** register a stage in a runtime-loaded module without re-triggering `__init__.py` — the registry is populated only at import time
+- **NEVER** swallow `KeyError` from `get_stage()` in production — orchestrator treats it as a hard config error
 
 ## NOTES
 - **Muon scale formula:** `0.2 * sqrt(max(A, B))` per Muon paper (Keller Jordan)
@@ -72,3 +93,7 @@ training/
   respectively (decaying by 2× per step into the future).
 - **`progress` propagation:** `train.py` passes `step/max_steps` to layer.forward → MoE.forward
 - **Liger fallback:** `importlib.util.find_spec("liger_kernel")` or just try-except — auto-fallback to vanilla
+- **Stage module naming:** `stages/<name>.py` corresponds to `@register_stage("<name>")`. File names are snake_case, registry names are also snake_case to match.
+- **Backward compat:** `train.py` is unchanged in v5.5. Users can run `uv run train.py --profile shpak` (legacy) OR `uv run cli.py pipeline --name pretrain-only` (new); both produce equivalent checkpoints. The `train.py` migration will be a separate PR.
+- **Stage framework phases:** Phase 0+1 (this release) = pretrain stage only. Phase 2-8 will add SFT, DPO, eval, REPL stages.
+- **Registry kind `stage`:** The stages use `busel_registry.register("stage", name)` (a new registry kind). `get_stage("pretrain")` returns the class. The existing `attention`/`optimizer`/`encoder` kinds are untouched.
