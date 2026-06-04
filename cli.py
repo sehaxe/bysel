@@ -5,7 +5,7 @@
 ╚═══════════════════════════════════════════════════════════════════════════╝
 """
 import typer
-from tools.data_manager import download_all, download_vision, download_text, download_sft, label_vision
+from tools.data_manager import download_all, download_vision, download_text, download_sft, label_vision, download_multimodal
 from tools.orchestrator import autopilot, train, profile
 
 app = typer.Typer(
@@ -18,6 +18,7 @@ app.command(name="download-all", help="📥 Bulk download and prepare ALL standa
 app.command(name="download-vision", help="📥 Stream and convert a ready-made vision dataset (COCO) from Hugging Face.")(download_vision)
 app.command(name="download-text", help="📥 Stream and convert text pretrain datasets (TinyStories/FineWeb-Edu) from Hugging Face.")(download_text)
 app.command(name="download-sft", help="📥 Download and prepare English instruction-following dataset (Alpaca).")(download_sft)
+app.command(name="download-multimodal", help="🛰️ Generate synthetic image/video/audio/docx test files for the multimodal encoders (no internet).")(download_multimodal)
 app.command(name="label-vision", help="🤖 Auto-label a local directory of images using a local Ollama vision model.")(label_vision)
 
 # 🚀 Регистрация команд обучения и сервисов

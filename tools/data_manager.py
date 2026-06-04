@@ -17,6 +17,8 @@ except ImportError:
 DATA_DIR = "data_train"
 IMAGES_DIR = os.path.join(DATA_DIR, "images")
 JSONL_PATH = os.path.join(DATA_DIR, "dataset.jsonl")
+MULTIMODAL_DIR = os.path.join(DATA_DIR, "multimodal")
+MULTIMODAL_MANIFEST = os.path.join(DATA_DIR, "multimodal_manifest.jsonl")
 
 # Инициализируем приложение Typer
 app = typer.Typer()
@@ -304,6 +306,112 @@ def label_vision(
     model: str = typer.Option("moondream", "--model", "-m", help="Local vision model in Ollama")
 ):
     pass
+
+
+def _synth_image(path: str, w: int, h: int, seed: int):
+    import cv2
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    arr = rng.integers(0, 255, (h, w, 3), dtype=np.uint8)
+    arr = cv2.putText(arr, f"busel #{seed}", (4, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
+    cv2.imwrite(path, arr)
+
+
+def _synth_video(path: str, n_frames: int, w: int, h: int, seed: int):
+    import cv2
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(path, fourcc, 10.0, (w, h))
+    for i in range(n_frames):
+        frame = rng.integers(0, 255, (h, w, 3), dtype=np.uint8)
+        frame = cv2.putText(frame, f"f{i}", (4, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
+        writer.write(frame)
+    writer.release()
+
+
+def _synth_audio(path: str, seconds: float, sr: int, seed: int):
+    import numpy as np
+    import soundfile as sf
+    rng = np.random.default_rng(seed)
+    n = int(seconds * sr)
+    data = (rng.standard_normal(n) * 0.1).astype(np.float32)
+    sf.write(path, data, sr)
+
+
+def _synth_docx(path: str, seed: int):
+    import docx
+    d = docx.Document()
+    d.add_heading(f"busel multimodal test #{seed}", level=1)
+    d.add_paragraph("This is a synthetic document for testing the docx encoder.")
+    d.add_paragraph(f"Seed: {seed}; created by `download-multimodal`.")
+    d.save(path)
+
+
+def _download_multimodal(n_per_kind: int):
+    os.makedirs(MULTIMODAL_DIR, exist_ok=True)
+
+    has_docx = True
+    has_sf = True
+    try:
+        import docx as _dx
+    except ImportError:
+        typer.echo(typer.style("⚠️ python-docx missing — docx samples skipped", fg=typer.colors.YELLOW))
+        has_docx = False
+    try:
+        import soundfile as _sf
+    except ImportError:
+        typer.echo(typer.style("⚠️ soundfile missing — audio samples skipped", fg=typer.colors.YELLOW))
+        has_sf = False
+
+    manifest = []
+    typer.echo(typer.style(f"🛰️ Generating {n_per_kind} synthetic samples per modality in '{MULTIMODAL_DIR}/'...", fg=typer.colors.CYAN, bold=True))
+
+    for i in range(n_per_kind):
+        img_path = os.path.join(MULTIMODAL_DIR, f"img_{i}.png")
+        _synth_image(img_path, 64, 64, seed=i)
+        manifest.append({"path": os.path.relpath(img_path, DATA_DIR), "modality": "image", "caption": f"synthetic image #{i}"})
+        if i % max(1, n_per_kind // 4) == 0:
+            typer.echo(f"   image: {i + 1}/{n_per_kind}")
+
+    for i in range(n_per_kind):
+        vid_path = os.path.join(MULTIMODAL_DIR, f"vid_{i}.mp4")
+        _synth_video(vid_path, n_frames=12, w=64, h=64, seed=i + 1000)
+        manifest.append({"path": os.path.relpath(vid_path, DATA_DIR), "modality": "video", "caption": f"synthetic video #{i}"})
+        if i % max(1, n_per_kind // 4) == 0:
+            typer.echo(f"   video: {i + 1}/{n_per_kind}")
+
+    if has_sf:
+        for i in range(n_per_kind):
+            wav_path = os.path.join(MULTIMODAL_DIR, f"aud_{i}.wav")
+            _synth_audio(wav_path, seconds=1.0, sr=16000, seed=i + 2000)
+            manifest.append({"path": os.path.relpath(wav_path, DATA_DIR), "modality": "audio", "caption": f"synthetic audio #{i}"})
+            if i % max(1, n_per_kind // 4) == 0:
+                typer.echo(f"   audio: {i + 1}/{n_per_kind}")
+
+    if has_docx:
+        for i in range(n_per_kind):
+            docx_path = os.path.join(MULTIMODAL_DIR, f"doc_{i}.docx")
+            _synth_docx(docx_path, seed=i + 3000)
+            manifest.append({"path": os.path.relpath(docx_path, DATA_DIR), "modality": "docx", "caption": f"synthetic docx #{i}"})
+            if i % max(1, n_per_kind // 4) == 0:
+                typer.echo(f"   docx: {i + 1}/{n_per_kind}")
+
+    typer.echo(typer.style("⚠️ PDF: requires `uv add docling` (heavyweight). Install separately, then drop into multimodal/ to train on PDFs.", fg=typer.colors.YELLOW))
+
+    with open(MULTIMODAL_MANIFEST, "w", encoding="utf-8") as f:
+        for entry in manifest:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    typer.echo(typer.style(f"✅ Wrote {len(manifest)} entries to '{MULTIMODAL_MANIFEST}'", fg=typer.colors.GREEN, bold=True))
+    typer.echo(typer.style(f"📂 Files: {MULTIMODAL_DIR}/", fg=typer.colors.GREEN))
+
+
+@app.command(name="download-multimodal")
+def download_multimodal(
+    limit: int = typer.Option(8, "--limit", "-l", help="Number of synthetic samples per modality (image, video, audio, docx)")
+):
+    """🛰️ Generate synthetic image/video/audio/docx test files for the multimodal encoders (no internet needed)."""
+    _download_multimodal(limit)
 
 
 # Безопасный запуск программы с принудительной выгрузкой зависших фоновых потоков

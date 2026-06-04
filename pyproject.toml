@@ -16,6 +16,10 @@ dependencies = [
     "pillow",
     "datasets>=4.8.5",
     "rich>=13.0.0",
+    "python-docx>=1.2.0",
+    "soundfile>=0.13.1",
+    "imageio[ffmpeg]>=2.37.3",
+    "opencv-python-headless>=4.13.0.92",
 ]
 
 [build-system]

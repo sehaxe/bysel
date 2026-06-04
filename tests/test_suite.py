@@ -4,7 +4,9 @@ Covers all 6 reference papers + end-to-end integration.
 """
 import os
 import sys
+import time
 import math
+import struct
 import unittest
 import json
 import inspect
@@ -29,6 +31,25 @@ from busel_registry import register, get, list_registered, is_registered, unregi
 from busel_logging import setup_logging, log_event, get_logger, JSONFormatter
 from ui.teto import frame as teto_frame, frames as teto_frames, states as teto_states
 from ui import cli as ui_cli
+
+try:
+    from multimodal.encoders import (
+        ImageEncoder,
+        VideoEncoder,
+        AudioEncoder,
+        PDFEncoder,
+        DocxEncoder,
+        TextEncoder,
+        auto_encode,
+        build_encoder_for,
+        IMAGE_MARKER,
+        MEDIA_END,
+        IMAGE_BYTES,
+    )
+    from multimodal import list_encoders as list_mm_encoders
+    HAS_MULTIMODAL_DEPS = True
+except Exception:
+    HAS_MULTIMODAL_DEPS = False
 
 
 class _MockConfig:
@@ -821,6 +842,258 @@ class TestbuselFramework(unittest.TestCase):
             if handle is not None:
                 handle.update(advance=5)
         print("   ✅ Animated header, spinner, progress bar, project tree all execute cleanly.")
+
+    @unittest.skipUnless(HAS_MULTIMODAL_DEPS, "multimodal encoders unavailable")
+    def test_mm_registry_lists_all_encoders(self):
+        """🛰️ busel MULTIMODAL — every encoder class self-registers on import."""
+        print("🧪 [MM-1] busel Multimodal — registry lists all 6 encoders...")
+        names = list_mm_encoders()
+        for n in ("image", "video", "audio", "pdf", "docx", "text"):
+            self.assertIn(n, names, f"encoder '{n}' must be registered")
+        self.assertGreaterEqual(len(names), 6)
+        print(f"   ✅ Multimodal registry: {sorted(names)}")
+
+    @unittest.skipUnless(HAS_MULTIMODAL_DEPS, "multimodal encoders unavailable")
+    def test_mm_image_encoder_roundtrip(self):
+        """🛰️ busel MULTIMODAL — ImageEncoder encode → decode returns 32×32 RGB."""
+        print("🧪 [MM-2] busel Multimodal — image encode/decode round-trip...")
+        from PIL import Image as _Im
+        src = _Im.new("RGB", (256, 256), color=(12, 34, 56))
+        enc = ImageEncoder()
+        tokens = enc.encode(src)
+        self.assertIsInstance(tokens, list, "encode must return list[int]")
+        self.assertEqual(len(tokens), IMAGE_BYTES + 2, f"must be {IMAGE_BYTES}+2 tokens, got {len(tokens)}")
+        self.assertEqual(tokens[0], IMAGE_MARKER, "first token must be 256 (__MEDIA_START__)")
+        self.assertEqual(tokens[-1], MEDIA_END, "last token must be 257 (__MEDIA_END__)")
+        for t in tokens[1:-1]:
+            self.assertGreaterEqual(t, 0)
+            self.assertLess(t, 256, f"image payload token {t} must be real byte (0..255)")
+        out = enc.decode(tokens)
+        self.assertEqual(out.size, (32, 32))
+        self.assertEqual(out.mode, "RGB")
+        print("   ✅ ImageEncoder: 32×32 RGB round-trip, marker tokens correct.")
+
+    @unittest.skipUnless(HAS_MULTIMODAL_DEPS, "multimodal encoders unavailable")
+    def test_mm_image_encoder_rejects_bad_blob(self):
+        """🛰️ busel MULTIMODAL — ImageEncoder.decode raises on missing/corrupt markers."""
+        print("🧪 [MM-3] busel Multimodal — image decode rejects bad blob...")
+        enc = ImageEncoder()
+        with self.assertRaises(ValueError):
+            enc.decode([])
+        with self.assertRaises(ValueError):
+            enc.decode([0] * 100)
+        with self.assertRaises(ValueError):
+            enc.decode([IMAGE_MARKER] + list(b"short") + [MEDIA_END])
+        print("   ✅ ImageEncoder.decode raises on bad input.")
+
+    @unittest.skipUnless(HAS_MULTIMODAL_DEPS, "multimodal encoders unavailable")
+    def test_mm_video_encoder_roundtrip(self):
+        """🛰️ busel MULTIMODAL — VideoEncoder encodes frame_count + N×32×32×3 to bytes."""
+        print("🧪 [MM-4] busel Multimodal — video encode/decode round-trip...")
+        import numpy as _np
+        import imageio.v3 as _iio
+        tmp = "temp_test_mm_video.mp4"
+        try:
+            n_frames = 6
+            frames = [_np.random.randint(0, 255, (32, 32, 3), dtype=_np.uint8) for _ in range(n_frames)]
+            _iio.imwrite(tmp, frames, fps=10)
+            enc = VideoEncoder(max_frames=3)
+            tokens = enc.encode_file(tmp)
+            self.assertIsInstance(tokens, list)
+            self.assertEqual(tokens[0], IMAGE_MARKER)
+            self.assertEqual(tokens[-1], MEDIA_END)
+            expected_len = 1 + 4 + 3 * IMAGE_BYTES + 1
+            self.assertEqual(len(tokens), expected_len, f"video must be {expected_len} tokens")
+            payload = enc.decode(tokens)
+            self.assertEqual(len(payload), 3 * IMAGE_BYTES, f"expected 3 frames × {IMAGE_BYTES}, got {len(payload)}")
+            print(f"   ✅ VideoEncoder: {n_frames}-frame input downsampled to 3 frames, round-trip OK.")
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+
+    @unittest.skipUnless(HAS_MULTIMODAL_DEPS, "multimodal encoders unavailable")
+    def test_mm_audio_encoder_roundtrip(self):
+        """🛰️ busel MULTIMODAL — AudioEncoder writes [sr][n][sw][PCM16] with markers."""
+        print("🧪 [MM-5] busel Multimodal — audio encode/decode round-trip...")
+        import numpy as _np
+        import soundfile as _sf
+        import wave as _wave
+        from io import BytesIO as _BI
+        tmp = "temp_test_mm_audio.wav"
+        try:
+            sr = 16000
+            data = _np.random.uniform(-0.3, 0.3, sr).astype(_np.float32)
+            _sf.write(tmp, data, sr)
+            enc = AudioEncoder(max_seconds=2.0)
+            tokens = enc.encode_file(tmp)
+            self.assertIsInstance(tokens, list)
+            self.assertEqual(tokens[0], IMAGE_MARKER)
+            self.assertEqual(tokens[-1], MEDIA_END)
+            header = bytes(tokens[1:11])
+            sr_out, n_out, sw_out = struct.unpack("<IIH", header)
+            self.assertEqual(sr_out, sr)
+            self.assertEqual(sw_out, 2, "sample_width must be 2 (int16)")
+            self.assertEqual(n_out, sr, "1 second @ 16kHz = 16000 samples")
+            wav = enc.decode_to_wav(tokens)
+            with _wave.open(_BI(wav), "rb") as wf:
+                self.assertEqual(wf.getframerate(), sr)
+                self.assertEqual(wf.getsampwidth(), 2)
+                self.assertEqual(wf.getnframes(), sr)
+            print("   ✅ AudioEncoder: 1s @ 16kHz round-trips, header layout correct.")
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+
+    @unittest.skipUnless(HAS_MULTIMODAL_DEPS, "multimodal encoders unavailable")
+    def test_mm_docx_encoder_roundtrip(self):
+        """🛰️ busel MULTIMODAL — DocxEncoder writes UTF-8 plain text with markers."""
+        print("🧪 [MM-6] busel Multimodal — docx encode round-trip...")
+        import docx as _docx
+        tmp = "temp_test_mm.docx"
+        try:
+            d = _docx.Document()
+            d.add_paragraph("Hello, multimodal Busel!")
+            d.add_paragraph("Line two.")
+            d.save(tmp)
+            enc = DocxEncoder()
+            tokens = enc.encode_file(tmp)
+            self.assertIsInstance(tokens, list)
+            self.assertEqual(tokens[0], IMAGE_MARKER)
+            self.assertEqual(tokens[-1], MEDIA_END)
+            text = bytes(tokens[1:-1]).decode("utf-8")
+            self.assertIn("Hello, multimodal Busel!", text)
+            self.assertIn("Line two.", text)
+            print("   ✅ DocxEncoder: 2-paragraph docx → UTF-8 tokens round-trip OK.")
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+
+    @unittest.skipUnless(HAS_MULTIMODAL_DEPS, "multimodal encoders unavailable")
+    def test_mm_text_encoder_passes_bytes_through(self):
+        """🛰️ busel MULTIMODAL — TextEncoder is a thin pass-through (no markers)."""
+        print("🧪 [MM-7] busel Multimodal — text encode is pass-through...")
+        tmp = "temp_test_mm.txt"
+        try:
+            with open(tmp, "wb") as f:
+                f.write(b"hello \xe2\x98\x83 unicode")
+            enc = TextEncoder()
+            tokens = enc.encode_file(tmp)
+            self.assertEqual(tokens, list(b"hello \xe2\x98\x83 unicode"))
+            self.assertNotIn(IMAGE_MARKER, tokens, "text encoder must NOT inject media markers")
+            self.assertNotIn(MEDIA_END, tokens, "text encoder must NOT inject media markers")
+            print("   ✅ TextEncoder: byte-for-byte pass-through, no marker injection.")
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+
+    @unittest.skipUnless(HAS_MULTIMODAL_DEPS, "multimodal encoders unavailable")
+    def test_mm_build_encoder_for_dispatch(self):
+        """🛰️ busel MULTIMODAL — build_encoder_for routes by extension, falls back to text."""
+        print("🧪 [MM-8] busel Multimodal — build_encoder_for extension dispatch...")
+        self.assertIsInstance(build_encoder_for("a.png"), ImageEncoder)
+        self.assertIsInstance(build_encoder_for("A.JPG"), ImageEncoder)
+        self.assertIsInstance(build_encoder_for("b.mp4"), VideoEncoder)
+        self.assertIsInstance(build_encoder_for("c.wav"), AudioEncoder)
+        self.assertIsInstance(build_encoder_for("d.docx"), DocxEncoder)
+        self.assertIsInstance(build_encoder_for("e.txt"), TextEncoder)
+        self.assertIsInstance(build_encoder_for("f.md"), TextEncoder)
+        self.assertIsInstance(build_encoder_for("g.unknown"), TextEncoder, "unknown must fall back to TextEncoder")
+        print("   ✅ build_encoder_for routes by extension (case-insensitive), falls back to text.")
+
+    @unittest.skipUnless(HAS_MULTIMODAL_DEPS, "multimodal encoders unavailable")
+    def test_mm_marker_constants_reserved_vocab(self):
+        """🛰️ busel MULTIMODAL — 256, 257, 258 are reserved marker tokens (outside 0..255)."""
+        print("🧪 [MM-9] busel Multimodal — marker tokens are reserved (>= 256)...")
+        self.assertEqual(IMAGE_MARKER, 256, "__MEDIA_START__ must be token 256")
+        self.assertEqual(MEDIA_END, 257, "__MEDIA_END__ must be token 257")
+        for marker in (IMAGE_MARKER, MEDIA_END, 258):
+            self.assertGreaterEqual(marker, 256, f"marker {marker} must be in reserved range (>= 256)")
+        for b in range(256):
+            self.assertNotIn(b, (IMAGE_MARKER, MEDIA_END, 258), f"byte {b} collides with reserved marker")
+        print("   ✅ Marker tokens 256, 257, 258 are reserved; no collision with valid UTF-8 bytes.")
+
+    @unittest.skipUnless(HAS_MULTIMODAL_DEPS, "multimodal encoders unavailable")
+    def test_mm_image_encoder_byte_layout_lossless(self):
+        """🛰️ busel MULTIMODAL — image encoder is lossless: encode→decode→encode is a fixed point."""
+        print("🧪 [MM-10] busel Multimodal — image encoder fixed point (lossless)...")
+        from PIL import Image as _Im
+        import numpy as _np
+        enc = ImageEncoder()
+        src = _Im.fromarray(_np.random.randint(0, 255, (100, 100, 3), dtype=_np.uint8))
+        blob1 = enc.encode(src)
+        decoded = enc.decode(blob1)
+        blob2 = enc.encode(decoded)
+        self.assertEqual(blob1, blob2, "encode→decode→encode must be a fixed point (lossless)")
+        print("   ✅ Image encoder is lossless: encode→decode→encode is byte-identical.")
+
+    @unittest.skipUnless(HAS_MULTIMODAL_DEPS, "multimodal encoders unavailable")
+    def test_mm_text_encoder_in_pipeline_collates_to_int32(self):
+        """🛰️ busel MULTIMODAL — encoder output flows through collate_busel_batch to int32 tensor."""
+        print("🧪 [MM-11] busel Multimodal — encoder output → collate → int32 tensor with values up to 258...")
+        from data.pipeline import collate_busel_batch
+        enc = TextEncoder()
+        tokens = enc.encode_file(__file__)
+        self.assertIsInstance(tokens, list)
+        batch = collate_busel_batch([(tokens, 0, 0)])
+        tensor, _, _ = batch
+        self.assertEqual(tensor.dtype, torch.int32, "collate must produce int32 tensor")
+        self.assertLess(tensor.max().item(), 259, "max token must be < 259 (vocab size)")
+        self.assertGreaterEqual(tensor.min().item(), 0, "min token must be >= 0")
+        self.assertEqual(tensor.shape[0], 1, "batch size must be 1")
+        print(f"   ✅ TextEncoder output flows through collate to int32 tensor of shape {tuple(tensor.shape)}, max={tensor.max().item()}.")
+
+    @unittest.skipUnless(HAS_MULTIMODAL_DEPS, "multimodal encoders unavailable")
+    def test_mm_cv2_fast_path_under_500ms_per_100_imgs(self):
+        """🛰️ busel MULTIMODAL — cv2 image encode: 100×256² images must encode in <500ms."""
+        print("🧪 [MM-12] busel Multimodal — cv2 fast-path throughput (100 imgs < 500ms)...")
+        try:
+            import cv2 as _cv2
+            import numpy as _np
+        except ImportError:
+            self.skipTest("opencv-python-headless not installed")
+        from PIL import Image as _Im
+        enc = ImageEncoder()
+        n = 100
+        src_arr = _np.random.randint(0, 255, (256, 256, 3), dtype=_np.uint8)
+        src = _Im.fromarray(src_arr)
+        t0 = time.perf_counter()
+        for _ in range(n):
+            enc.encode(src)
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        per_op = elapsed_ms / n
+        self.assertLess(elapsed_ms, 500, f"100 cv2 encodings took {elapsed_ms:.1f}ms (> 500ms budget)")
+        print(f"   ✅ cv2 fast path: {per_op:.2f} ms/image ({n} images in {elapsed_ms:.1f}ms)")
+
+    @unittest.skipUnless(HAS_MULTIMODAL_DEPS, "multimodal encoders unavailable")
+    def test_mm_video_cv2_path_under_2s_for_60_frame_video(self):
+        """🛰️ busel MULTIMODAL — cv2 video encode: 60-frame synthetic video must encode in <2s."""
+        print("🧪 [MM-13] busel Multimodal — cv2 video path throughput (60 frames < 2s)...")
+        try:
+            import cv2 as _cv2
+            import numpy as _np
+        except ImportError:
+            self.skipTest("opencv-python-headless not installed")
+        tmp = "temp_test_mm_video_perf.mp4"
+        try:
+            n_frames = 60
+            h, w = 128, 128
+            fourcc = _cv2.VideoWriter_fourcc(*"mp4v")
+            writer = _cv2.VideoWriter(tmp, fourcc, 30.0, (w, h))
+            for i in range(n_frames):
+                frame = _np.random.randint(0, 255, (h, w, 3), dtype=_np.uint8)
+                writer.write(frame)
+            writer.release()
+            enc = VideoEncoder(max_frames=8)
+            t0 = time.perf_counter()
+            tokens = enc.encode_file(tmp)
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+            self.assertLess(elapsed_ms, 2000, f"video encoding took {elapsed_ms:.1f}ms (> 2000ms budget)")
+            self.assertEqual(tokens[0], IMAGE_MARKER)
+            self.assertEqual(tokens[-1], MEDIA_END)
+            print(f"   ✅ cv2 video path: 60 frames @ 128×128 → 8 frames in {elapsed_ms:.1f}ms")
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
 
 
 if __name__ == "__main__":

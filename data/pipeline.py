@@ -22,6 +22,13 @@ except ImportError:
     HAS_PANDAS = False
 
 try:
+    import cv2
+    import numpy as np
+    HAS_CV2 = True
+except ImportError:
+    HAS_CV2 = False
+
+try:
     from PIL import Image
     HAS_PIL = True
 except ImportError:
@@ -49,37 +56,69 @@ class PythonByteStreamer:
         return self.position
 
 class buselOmnivoreTextExtractor:
+    _MULTIMODAL_EXTS = (
+        ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff",
+        ".mp4", ".mov", ".avi", ".mkv", ".webm",
+        ".wav", ".flac", ".ogg",
+        ".pdf", ".docx",
+    )
+
     def __init__(self, file_path, chunk_size, start_offset=0, img_size=(32, 32)):
         self.file_path = file_path
         self.chunk_size = chunk_size
         self.position = start_offset
         self.img_size = img_size
-        self.raw_bytes = bytearray()
+        self.raw_bytes = []
 
-        if file_path.endswith('.parquet'):
+        ext = os.path.splitext(file_path)[1].lower()
+
+        if ext in self._MULTIMODAL_EXTS:
+            try:
+                from multimodal.encoders import build_encoder_for
+                enc = build_encoder_for(file_path)
+                if enc.__class__.__name__ == "TextEncoder" and ext != ".txt":
+                    raise ImportError(f"no multimodal encoder available for {ext}")
+                self.raw_bytes = list(enc.encode_file(file_path))
+            except ImportError:
+                with open(file_path, "rb") as f:
+                    self.raw_bytes = list(f.read())
+        elif file_path.endswith('.parquet'):
             if not HAS_PANDAS:
                 raise ImportError("❌ Для чтения .parquet установите: 'uv add pandas pyarrow'")
             df = pd.read_parquet(file_path)
             text_col = self._detect_text_column(df)
             full_text = "\n".join(text_col.astype(str).tolist())
-            self.raw_bytes = bytearray(full_text.encode('utf-8'))
+            self.raw_bytes = list(full_text.encode('utf-8'))
         elif file_path.endswith('.jsonl'):
             with open(file_path, "r", encoding="utf-8") as f:
                 for line in f:
                     if not line.strip(): continue
                     try:
                         data = json.loads(line)
-                        if "image" in data and HAS_PIL:
+                        if "image" in data and (HAS_CV2 or HAS_PIL):
                             img_path = data["image"]
                             if not os.path.isabs(img_path):
                                 img_path = os.path.join(os.path.dirname(file_path), img_path)
                             if os.path.exists(img_path):
-                                img = Image.open(img_path).convert("RGB")
-                                img = img.resize(self.img_size)
-                                img_bytes = img.tobytes()
-                                self.raw_bytes.append(256) 
+                                if HAS_CV2:
+                                    arr = cv2.imread(img_path, cv2.IMREAD_COLOR)
+                                    if arr is None:
+                                        arr = cv2.imdecode(np.fromfile(img_path, dtype=np.uint8), cv2.IMREAD_COLOR)
+                                    if arr is None and HAS_PIL:
+                                        arr = np.asarray(Image.open(img_path).convert("RGB"))
+                                        arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR) if arr is not None else None
+                                    if arr is not None:
+                                        arr = cv2.resize(arr, self.img_size, interpolation=cv2.INTER_AREA)
+                                        arr = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
+                                        img_bytes = arr.tobytes()
+                                    else:
+                                        continue
+                                else:
+                                    img = Image.open(img_path).convert("RGB").resize(self.img_size)
+                                    img_bytes = img.tobytes()
+                                self.raw_bytes.append(256)
                                 self.raw_bytes.extend(img_bytes)
-                                self.raw_bytes.append(257) 
+                                self.raw_bytes.append(257)
                                 text_val = self._recursive_extract_excluding_image(data)
                                 if text_val.strip():
                                     self.raw_bytes.extend(text_val.strip().encode('utf-8'))
@@ -93,7 +132,7 @@ class buselOmnivoreTextExtractor:
                         continue
         else:
             with open(file_path, "rb") as f:
-                self.raw_bytes = bytearray(f.read())
+                self.raw_bytes = list(f.read())
 
     def _recursive_extract_excluding_image(self, obj):
         if isinstance(obj, str):

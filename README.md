@@ -1,10 +1,12 @@
-# Busel (Бусел) — Sovereign Any-Scale 1-bit LLM
+# Busel (Бусел) — Sovereign Any-Scale 1-bit Multimodal LLM
 
 > *Pronounced **[ˈbusɛl]** — from Belarusian **бусел** (stork).*
 >
 > A token-free, 1.58-bit, hybrid linear-attention LLM with **mAR** residuals,
-> MoE, byte-level patching, and MTP-4. Trains and infers on consumer hardware
-> (RTX 5060 Ti 16 GB / Apple Silicon Mac) without any external tokenizer.
+> MoE, byte-level patching, and MTP-4. **Any-to-text**: trains on images,
+> video, audio, PDF, docx in the same byte stream as text. Runs on consumer
+> hardware (RTX 5060 Ti 16 GB / Apple Silicon Mac) without any external
+> tokenizer.
 
 [![Python 3.12](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org)
 [![CUDA / MPS / CPU](https://img.shields.io/badge/device-CUDA%20%7C%20MPS%20%7C%20CPU-green.svg)](#hardware-support)
@@ -23,8 +25,9 @@ in whether the *scaling-laws ceiling* can be pushed down by:
    At inference the math becomes pure additions on CPU, the model shrinks to
    ~11 MB for a 50 M-param profile, and FP16 multiplications disappear.
 2. **Byte-level tokens (vocab=259)** — no BPE. No 40 % of the model wasted on
-   an embedding matrix. The same byte stream can carry text, code, JSON,
-   images (32×32×3 = 3072 bytes, byte `256` marker), and PDFs (via Docling).
+   an embedding matrix. The same token stream carries text, code, JSON,
+   images (32×32×3 = 3072 tokens, token `256` marker), video, audio, PDF
+   (via Docling), and docx. See [Multimodal data](https://sehaxe.github.io/busel-ai/data/multimodal/).
 3. **mAR (Manifold Constrained Attention Residuals)** — replaces the
    classical `y = x + f(x)` residual with an input-dependent, doubly-stochastic
    mixture of the last `n_hyper` layer outputs projected onto the **Birkhoff
@@ -43,9 +46,12 @@ in whether the *scaling-laws ceiling* can be pushed down by:
    patches, batch adapts inversely to hold VRAM constant, and the exact step
    count is derived from the Chinchilla byte-law
    `D ≈ 80 × N` for the profile in use.
+7. **OpenCV fast paths** — image and video encoders use cv2 (`cv2.resize`
+   with `INTER_AREA`, `cv2.VideoCapture` with `CAP_PROP_FRAME_COUNT` +
+   `cap.grab()` for seek-skipping). ~5-10× faster than PIL/imageio.
 
 The codebase is intentionally small — the entire model + training + data
-pipeline is ~2,300 lines of Python and ~140 lines of Rust, so you can read
+pipeline is ~2,500 lines of Python and ~140 lines of Rust, so you can read
 the whole thing in an afternoon.
 
 ---
@@ -56,8 +62,9 @@ the whole thing in an afternoon.
 # 1. Install Python deps (uses uv)
 uv sync
 
-# 2. (Optional) Add PDF support
-uv add docling
+# 2. (Optional) Add PDF + vision support
+uv add docling              # PDF support
+# opencv-python-headless is already in pyproject.toml (image/video fast path)
 
 # 3. Compile the Rust byte-streamer into the venv
 uv run maturin develop --release
@@ -66,6 +73,8 @@ uv run maturin develop --release
 cp ~/my_corpus.txt data_train/
 # Or:
 uv run python cli.py download-all --preset shpak
+# Or, for multimodal test files (image/video/audio/docx — no internet):
+uv run python cli.py download-multimodal --limit 8
 
 # 5. Train the 52 M-param Shpak profile end-to-end
 uv run train.py --profile shpak
@@ -75,13 +84,26 @@ That's the whole pipeline. The first run is slow because `torch.compile`
 traces the model (≈30 s on RTX 5060 Ti for a small profile, longer for
 Shpak). Subsequent steps run at ~570 k tok/s on the validation profile.
 
+For multimodal training, drop images / videos / audio / PDFs / docx files
+into `data_train/multimodal/` (or any subfolder of `data_train/`). The
+data loader auto-dispatches by extension.
+
 ---
 
 ## Architecture in one minute
 
 ```
-                    raw UTF-8 bytes (B × T)
+                text / image / video / audio / PDF / docx
                               │
+                              ▼
+            ┌─────────────────────────────────────┐
+            │ multimodal/encoders                │  OpenCV fast path
+            │   text  → list[int]  (UTF-8 bytes)  │  PIL/imageio fallback
+            │   image → [256] [3072 RGB] [257]   │  docling for PDF
+            │   video → [256] [N×3072 frames]    │  python-docx for docx
+            │   audio → [256] [sr][n][sw][PCM]   │  soundfile for audio
+            └─────────────────────────────────────┘
+                              │  tokens (B × T, values 0-258)
                               ▼
             ┌─────────────────────────────────────┐
             │ StridedFastBLTPatcher              │  stride=4 conv
@@ -111,7 +133,8 @@ Shpak). Subsequent steps run at ~570 k tok/s on the validation profile.
 ```
 
 Read the deep dive in the docs:
-[**Architecture overview**](https://sehaxe.github.io/busel-ai/architecture/overview/).
+[**Architecture overview**](https://sehaxe.github.io/busel-ai/architecture/overview/),
+[**Multimodal data**](https://sehaxe.github.io/busel-ai/data/multimodal/).
 
 ---
 
@@ -121,10 +144,11 @@ Read the deep dive in the docs:
 busel-ai/
 ├── model/              # BitNet v2 architecture (BitLinear, mAR, attention mix)
 ├── training/           # Muon+AdamW hybrid optimizer, AutoPilot v6.0, MTP-4 loss
-├── data/               # Stream-interleaving byte loader (Rust mmap or Python)
+├── data/               # Stream-interleaving token loader (list[int], Rust mmap or Python)
+├── multimodal/         # 🛰️ Any-to-token encoders (image/video/audio/PDF/docx) — cv2 fast path
 ├── ui/                 # Teto Vocaloid emoticon + rich terminal helpers
 ├── tools/              # CLI (typer), data_manager, orchestrator, plotter, inference
-├── tests/              # unittest suite (61 tests) + ultra-stable profiler v2.0
+├── tests/              # unittest suite (77 tests) + ultra-stable profiler v2.0
 ├── busel_rust_io/      # PyO3 Rust ext: mmap ByteStreamer, ternary matmul, packer
 ├── configs/            # default.yaml — Shpak / Zubr / Chyzh / micro_test / quick_test
 ├── site/               # Astro+Starlight docs site (this wiki)
@@ -202,6 +226,10 @@ uv run python tools/inference.py --repl   # interactive chat
 uv run python tools/profiler_run.py       # one-step CPU/GPU breakdown
 uv run python tools/plotter.py            # plot loss / lr / grad norm
 uv run python tools/orchestrator.py download --preset shpak
+
+# Multimodal
+uv run python cli.py download-multimodal --limit 8   # synth img/video/audio/docx test set
+# Drop real images / videos / audio / PDFs / docx into data_train/multimodal/ and train as usual.
 ```
 
 Every flag is documented inline; `uv run train.py --help` is the canonical
@@ -219,7 +247,7 @@ and is published to <https://sehaxe.github.io/busel-ai/>.
 | **Get Started** | Install, build, first training run |
 | **Architecture** | 1-bit weights, mAR, attention mix, MoE, MTP, patching |
 | **Training** | Training guide, AutoPilot, curriculum, optimizer |
-| **Data** | Pipeline, formats, presets, multimodal encoding |
+| **Data** | Pipeline, formats, presets, **multimodal** (image/video/audio/PDF/docx — cv2 fast path) |
 | **API** | Model classes, registry, logging, UI helpers |
 | **Performance** | torch.compile modes, hardware tuning, profiling |
 | **Operations** | Inference, troubleshooting, FAQ |
@@ -294,9 +322,15 @@ class MyNewAttention(nn.Module):
 It will be discoverable via `get("attention", "my_new_attention")` and
 listed in the registry dump. No central switch statement to edit.
 
-Tests live in [`tests/test_suite.py`](./tests/test_suite.py) (61 tests,
+Tests live in [`tests/test_suite.py`](./tests/test_suite.py) (77 tests,
 verbose mode by default, no pytest, no torch.profiler on MPS). Add new
 tests there — never spawn a second test file.
+
+The **multimodal** module follows the same pattern: encoders are registered
+via `@register("encoder", name)`. To add a new modality, write a class that
+returns `list[int]` (NOT `bytes`) and add it to `multimodal/encoders.py`.
+See [`multimodal/AGENTS.md`](./multimodal/AGENTS.md) for the full design
+rationale, anti-patterns, and performance characteristics.
 
 ---
 

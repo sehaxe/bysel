@@ -6,6 +6,80 @@ adheres to [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`).
 
 ---
 
+## [5.3.0] — 2026-06-04 — "Multimodal Sovereign" 🛰️
+
+### Added
+
+- **`multimodal/` module** — 6 encoders that turn any file into a
+  `list[int]` stream in the same 259-vocab the byte-level model already
+  consumes. All registered via `@register("encoder", name)`:
+  - `ImageEncoder` — image (PNG/JPEG/WebP/BMP/GIF/TIFF) → 32×32×3 RGB payload
+  - `VideoEncoder` — video (MP4/MOV/AVI/MKV/WebM) → max 8 evenly-spaced 32×32 frames
+  - `AudioEncoder` — audio (WAV/FLAC/OGG) → 16-bit PCM with sr/n/sw header
+  - `PDFEncoder` — PDF → Docling markdown → UTF-8 bytes
+  - `DocxEncoder` — DOCX → python-docx plain text → UTF-8 bytes
+  - `TextEncoder` — UTF-8 pass-through (no markers)
+- **`download-multimodal` CLI** (`uv run python cli.py download-multimodal --limit 8`)
+  generates a synthetic 4-modality test set in `data_train/multimodal/` —
+  image / video / audio / docx — and writes a `multimodal_manifest.jsonl`.
+  No internet required.
+- **OpenCV (cv2) fast paths** — `ImageEncoder` and `VideoEncoder` use
+  `cv2.imread` + `cv2.resize INTER_AREA` + `cv2.VideoCapture` (with
+  `CAP_PROP_FRAME_COUNT` for O(1) frame count + `cap.grab()` for
+  seek-skipping). PIL and imageio are fallbacks (~5-10× slower).
+- **Multimodal docs page** at
+  `site/src/content/docs/data/multimodal.md` — complete guide including
+  token layouts, encoder dispatch, performance benchmarks, and the
+  rationale for byte-level uniformity.
+- **`multimodal/AGENTS.md`** — module-level knowledge base following
+  the convention of `data/`, `model/`, `training/`, `tools/`,
+  `busel_rust_io/`, `tests/`.
+- **13 new tests** in `tests/test_suite.py` (prefix `MM-1` … `MM-13`):
+  registry, image/video/audio/docx/text round-trips, marker validation,
+  fixed-point losslessness, end-to-end pipeline collate, cv2 fast-path
+  throughput benchmarks (100 images <500 ms, 60-frame video <2 s).
+- **Multimodal training verified end-to-end on RTX 5060 Ti** — 8 steps
+  on COCO images + captions, loss 5.59 → 5.49, no NaN, 97.5 % params
+  to Muon (the routing fix from 5.2.0). Markers 256/257 correctly placed
+  in every batch.
+
+### Changed
+
+- **`data/pipeline.py:buselOmnivoreTextExtractor`** auto-dispatches
+  image/video/audio/PDF/docx files to the new encoders. The
+  `self.raw_bytes` is now `list[int]` (was `bytearray`) — required
+  to hold token values ≥ 256.
+- **`multimodal/encoders.py` docstring** documents the critical
+  design: encoders return `list[int]`, NOT `bytes`, because Python's
+  `bytes` cannot represent values ≥ 256.
+- **AGENTS.md / data/AGENTS.md** — updated to reflect the new
+  representation, the cv2 fast path, and the resolved latent bug
+  (`bytearray.append(256)` would have raised `ValueError`).
+
+### Fixed
+
+- **Latent bug in `buselOmnivoreTextExtractor`** — `bytearray.append(256)`
+  raises `ValueError: byte must be in range(0, 256)`. The image path
+  in JSONL was never exercised in tests, so the bug was hidden. Fixed
+  by switching `self.raw_bytes` to `list[int]`. The collate function
+  `collate_busel_batch` already supported `list` input.
+- **Tokenizer marker documentation drift** — the previous `multimodal.md`
+  page documented `__BOS__=256`, `__DOC_SEP__=257`, `__MEDIA__=258`,
+  but the model and pipeline actually use `__MEDIA_START__=256`,
+  `__MEDIA_END__=257`, `__DOC_SEP__=258`. The page has been rewritten
+  to match the implementation.
+
+### Performance (RTX 5060 Ti)
+
+| Operation | Latency | vs PIL baseline |
+|---|---:|---:|
+| Image encode (256² → 32×32) | **0.44 ms** | 5.7× faster |
+| Video encode (60 frames @ 128×128 → 8 frames) | **4.5 ms** | ~10× faster |
+| Audio encode (1 s @ 16 kHz WAV) | ~0.5 ms | soundfile baseline |
+| End-to-end multimodal pipeline (8 files, mixed) | 14.8 ms | — |
+
+---
+
 ## [5.2.0] — 2026-06-04 — "Sovereign 1-bit LLM"
 
 ### Added

@@ -12,12 +12,13 @@
 busel-ai/
 ├── model/              # BitNet v2 architecture (patching/layers/attention/routing/backbone)
 ├── training/           # Muon+AdamW hybrid optimizer, AutoPilot v6.0, MTP-4 loss
-├── data/               # Stream-interleaving byte loader (Rust mmap or Python fallback)
+├── data/               # Stream-interleaving token loader (list[int], Rust mmap or Python fallback)
+├── multimodal/         # 🛰️ Any-to-token encoders (image, video, audio, PDF, docx) — cv2 fast path
 ├── ui/                 # 🎵 Teto Vocaloid emoticon avatar + max-beauty rich terminal helpers
-├── busel_registry.py   # 🛸 Plug-in extension-point registry (attention/optimizer/...)
+├── busel_registry.py   # 🛸 Plug-in extension-point registry (attention/optimizer/encoder/...)
 ├── busel_logging.py    # 📚 Structured JSONL event stream (checkpoints/busel.log.jsonl)
 ├── tools/              # Typer CLI, data_manager, orchestrator, plotter, inference
-├── tests/              # unittest suite + ultra-stable profiler v2.0
+├── tests/              # unittest suite (77 tests) + ultra-stable profiler v2.0
 ├── busel_rust_io/      # PyO3 Rust ext: mmap ByteStreamer, ternary matmul, binary packer
 ├── configs/            # default.yaml — Shpak/Zubr/Chyzh/MicroTest/QuickTest profiles
 ├── site/               # Astro+Starlight docs (GitHub Pages)
@@ -31,10 +32,11 @@ busel-ai/
 ## WHERE TO LOOK
 | Task | Location | Notes |
 |------|----------|-------|
-| Add new model layer | [model/](file:///home/sehaxe/busel-ai/model/AGENTS.md) | Must use BitLinear_a4_8 / H_BitLinear / RMSNorm |
+| Add new model layer | [model/](file:///home/sehaxe/busel-ai/model/AGENTS.md) | Must use BitLinear_a4_8 / H_BitLinear |
 | Modify training loop | [train.py](file:///home/sehaxe/busel-ai/train.py) + [training/](file:///home/sehaxe/busel-ai/training/AGENTS.md) | Cybernetic curriculum is here |
-| Add CLI command | [cli.py](file:///home/sehaxe/busel-ai/cli.py) → register in `tools.orchestrator` | Typer-based |
-| Modify data loader | [data/pipeline.py](file:///home/sehaxe/busel-ai/data/pipeline.py) | Prefers Rust `ByteStreamer`; Python fallback exists |
+| Add CLI command | [cli.py](file:///home/sehaxe/busel-ai/cli.py) → register in `tools.orchestrator` or `tools.data_manager` | Typer-based |
+| Modify data loader | [data/pipeline.py](file:///home/sehaxe/busel-ai/data/pipeline.py) | Prefers Rust `ByteStreamer`; Python fallback exists; auto-dispatches to multimodal encoders |
+| Add a new modality | [multimodal/](file:///home/sehaxe/busel-ai/multimodal/AGENTS.md) → new `@register("encoder", "...")` class | Must return `list[int]` with values in `[0, 259)` |
 | Tune model size | [configs/default.yaml](file:///home/sehaxe/busel-ai/configs/default.yaml) | Profile: shpak/zubr/chyzh/micro_test/quick_test |
 | Profile step perf | [tests/profiler_run.py](file:///home/sehaxe/busel-ai/tests/profiler_run.py) | No torch.profiler (MPS hangs) |
 | Edit docs site | [site/](file:///home/sehaxe/busel-ai/site/) | `bun install && bun run build` |
