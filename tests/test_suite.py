@@ -25,7 +25,7 @@ from model.attention import stable_gdn2_recurrent_jit, BulbaGDN2SeRoPEBlock, Mul
 from model.routing import MoDSequenceRouter, BulbaTernaryTitanExpertFFN, BulbaTernaryTitanMoE
 from model.backbone import buselModel, ManifoldConstrainedAttnRes
 from training.optimizer import _compiled_newton_schulz, buselOptimizerEngine, Muon, _newton_schulz_core
-from training.recipe import buselLossEngine
+from training.recipe import buselLossEngine, validate_training_schedule
 
 from busel_registry import register, get, list_registered, is_registered, unregister, clear_registry
 from busel_logging import setup_logging, log_event, get_logger, JSONFormatter
@@ -1094,6 +1094,94 @@ class TestbuselFramework(unittest.TestCase):
         finally:
             if os.path.exists(tmp):
                 os.remove(tmp)
+
+    def test_muon_routing_rule_2d_proj_router_embed(self):
+        """🛡️ Muon routing (ISSUES.md #5): 2D+!router+!embed → Muon, else → AdamW."""
+        print("🧪 [R5] busel Muon routing — 2D non-router/non-embed → Muon, else → AdamW...")
+        class MockM(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers_q_proj = torch.nn.Linear(64, 64, bias=False)
+                self.expert_ffn_0_weight = torch.nn.Parameter(torch.randn(128, 64))
+                self.mtp_head_3 = torch.nn.Parameter(torch.randn(259, 128))
+                self.bias = torch.nn.Parameter(torch.zeros(64))
+                self.router = torch.nn.Linear(64, 4, bias=False)
+                self.token_embed = torch.nn.Parameter(torch.randn(259, 64))
+
+        model = MockM()
+        engine = buselOptimizerEngine(model, lr_muon=0.01, lr_adamw=0.001)
+        muon_param_ids = {id(p) for p in engine.opt_muon.param_groups[0]['params']}
+        adamw_param_ids = {id(p) for p in engine.opt_adamw.param_groups[0]['params']}
+        for name, p in model.named_parameters():
+            in_muon = id(p) in muon_param_ids
+            in_adamw = id(p) in adamw_param_ids
+            self.assertTrue(in_muon or in_adamw, f"{name} assigned to NEITHER optimizer")
+            self.assertFalse(in_muon and in_adamw, f"{name} assigned to BOTH optimizers")
+            if "router" in name or "embed" in name or p.ndim != 2:
+                self.assertTrue(in_adamw, f"{name} (1D/router/embed) should be in AdamW, got Muon")
+            else:
+                self.assertTrue(in_muon, f"{name} (2D+!router+!embed) should be in Muon, got AdamW")
+        n_muon = len(muon_param_ids)
+        n_adamw = len(adamw_param_ids)
+        self.assertEqual(n_muon, 3, f"expected 3 Muon params, got {n_muon}")
+        self.assertEqual(n_adamw, 3, f"expected 3 AdamW params, got {n_adamw}")
+        print(f"   ✅ Muon routing: 3 Muon / 3 AdamW (correctly excludes router/embed/1D).")
+
+    def test_training_schedule_guard_rejects_bad_inputs(self):
+        """🛡️ Schedule guard (ISSUES.md #7): max_steps > warmup_steps, warmup >= 1."""
+        print("🧪 [R7] busel schedule guard — rejects max_steps<=warmup_steps and warmup<1...")
+        with self.assertRaises(ValueError, msg="max_steps==warmup_steps must be rejected"):
+            validate_training_schedule(100, 100)
+        with self.assertRaises(ValueError, msg="max_steps<warmup_steps must be rejected"):
+            validate_training_schedule(50, 100)
+        with self.assertRaises(ValueError, msg="warmup_steps<1 must be rejected"):
+            validate_training_schedule(100, 0)
+        with self.assertRaises(ValueError, msg="warmup_steps<0 must be rejected"):
+            validate_training_schedule(100, -5)
+        with self.assertRaises(ValueError, msg="None must be rejected"):
+            validate_training_schedule(None, 10)
+        with self.assertRaises(ValueError, msg="None must be rejected"):
+            validate_training_schedule(10, None)
+        max_s, warmup_s = validate_training_schedule(200, 10)
+        self.assertEqual((max_s, warmup_s), (200, 10))
+        max_s, warmup_s = validate_training_schedule("300", "20")
+        self.assertEqual((max_s, warmup_s), (300, 20), "string-cast ints must be normalised")
+        print("   ✅ Schedule guard: rejects all 6 bad cases, accepts 2 valid cases.")
+
+    def test_inject_noise_branchless_preserves_grad_shape(self):
+        """🛡️ inject_noise (ISSUES.md #6): branchless mask keeps grad shape & adds bounded noise."""
+        print("🧪 [R6] busel inject_noise — branchless mask, grad shape preserved, noise bounded...")
+        from training.autopilot import buselAutoPilot
+
+        class _MockEngine:
+            def __init__(self):
+                self.opt_muon = type("O", (), {"param_groups": [{"params": []}]})()
+                self.opt_adamw = type("O", (), {"param_groups": [{"params": []}]})()
+
+        engine = _MockEngine()
+        ap = buselAutoPilot(engine, max_lr_muon=0.01, max_lr_adamw=0.001, noise_scale=0.1)
+        ap.noise_scale = 0.1
+
+        model = torch.nn.Sequential(
+            torch.nn.Linear(8, 8, bias=False),
+            torch.nn.Linear(8, 4, bias=False),
+        )
+        for p in model.parameters():
+            p.grad = torch.randn_like(p) * 0.5
+        g_before = [p.grad.clone() for p in model.parameters()]
+
+        ap.inject_noise(model)
+
+        for p, g in zip(model.parameters(), g_before):
+            self.assertEqual(p.grad.shape, g.shape, "grad shape must be preserved")
+            self.assertTrue(torch.isfinite(p.grad).all(), "grad must remain finite")
+            self.assertFalse(torch.allclose(p.grad, g, atol=1e-8), "noise should perturb the grad")
+        ap.noise_scale = 0.0
+        g_before2 = [p.grad.clone() for p in model.parameters()]
+        ap.inject_noise(model)
+        for p, g in zip(model.parameters(), g_before2):
+            self.assertTrue(torch.allclose(p.grad, g, atol=1e-12), "noise_scale=0 must be no-op")
+        print("   ✅ inject_noise: shape preserved, finite, no-op at zero scale.")
 
 
 if __name__ == "__main__":

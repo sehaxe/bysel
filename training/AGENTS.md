@@ -25,10 +25,11 @@ training/
 |---|---|---|---|
 | `_newton_schulz_core` | function | optimizer.py | Quintic NS iteration, 5 steps, transposed for tall matrices |
 | `_compiled_newton_schulz` | function | optimizer.py | `@torch.compile(reduce-overhead)` on Linux+CUDA; eager fallback |
-| `Muon` | Optimizer | optimizer.py | Manual momentum + NS orthogonalize, scale=`0.2*sqrt(max(A,B))`. NS initial normalisation uses 1-step power iteration (spectral norm) rather than Frobenius. |
+| `Muon` | Optimizer | optimizer.py | Manual momentum + NS orthogonalize, scale=`0.2*sqrt(max(A,B))`. NS initial normalisation divides by Frobenius norm (deliberately over-normalising: `‖X‖₂ ≤ ‖X‖_F`, so `X/‖X‖_F` guarantees spectral norm ≤ 1 with strict margin). Spectral norm (`X/‖X‖₂`) is theoretically tighter but lands exactly on the NS convergence boundary and is sensitive to FP error — see `_newton_schulz_core` docstring for the divergence note. |
 | `buselOptimizerEngine` | class | optimizer.py | Splits params: 2D+!`router`+!`embed`→Muon; rest→AdamW. Prints routing summary. |
 | `buselAutoPilot` | class | autopilot.py | Wraps engine; tracks loss/grad history; recovery countdown |
 | `buselLossEngine` | class | recipe.py | Liger-CE on CUDA; vanilla F.cross_entropy elsewhere; MTP weights [0.5, 0.25, 0.125] |
+| `validate_training_schedule` | function | recipe.py | Runtime guard for `max_steps > warmup_steps` and `warmup >= 1` (ISSUES.md #7); called from `train.py` after auto-planning |
 
 ## CONVENTIONS
 - **Param routing rule:** `param.ndim == 2 and "router" not in name and "embed" not in name` → Muon

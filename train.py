@@ -32,7 +32,7 @@ from model.patching import StridedFastBLTPatcher
 from model.backbone import buselModel
 from training.optimizer import buselOptimizerEngine
 from training.autopilot import buselAutoPilot
-from training.recipe import buselLossEngine
+from training.recipe import buselLossEngine, validate_training_schedule
 
 from busel_logging import setup_logging, log_event
 from ui import cli as ui
@@ -239,17 +239,7 @@ def main():
         cfg.warmup_steps = int(cfg.warmup_steps)
 
     # Runtime guard (ISSUES.md #7): max_steps must exceed warmup_steps.
-    if cfg.max_steps <= cfg.warmup_steps:
-        raise ValueError(
-            f"max_steps ({cfg.max_steps}) must be strictly greater than "
-            f"warmup_steps ({cfg.warmup_steps}). Either raise max_steps or "
-            f"lower warmup_steps in configs/default.yaml."
-        )
-    if cfg.warmup_steps < 1:
-        raise ValueError(
-            f"warmup_steps ({cfg.warmup_steps}) must be >= 1. The first 50 "
-            f"steps also need to be free of predictive dampening (autopilot.py)."
-        )
+    cfg.max_steps, cfg.warmup_steps = validate_training_schedule(cfg.max_steps, cfg.warmup_steps)
 
     # Gradient Checkpointing (CUDA only)
     if device == "cuda" and not args.no_checkpointing:

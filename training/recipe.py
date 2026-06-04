@@ -14,6 +14,38 @@ except ImportError:
     HAS_LIGER = False
 
 
+def validate_training_schedule(max_steps, warmup_steps):
+    """Runtime guard for the training schedule (ISSUES.md #7).
+
+    Rejects `max_steps <= warmup_steps` (would cause NaN spikes in
+    `autopilot.update_parameters` when computing `progress / 0` or `progress > 1.0`).
+    Also rejects `warmup_steps < 1` (autopilot needs the first 50 steps to
+    be free of predictive dampening).
+
+    Returns the validated `(max_steps, warmup_steps)` as a tuple of ints, or
+    raises `ValueError` with a helpful message.
+    """
+    if max_steps is None or warmup_steps is None:
+        raise ValueError(
+            f"max_steps ({max_steps}) and warmup_steps ({warmup_steps}) must be "
+            f"set to integers before calling validate_training_schedule"
+        )
+    max_steps = int(max_steps)
+    warmup_steps = int(warmup_steps)
+    if max_steps <= warmup_steps:
+        raise ValueError(
+            f"max_steps ({max_steps}) must be strictly greater than "
+            f"warmup_steps ({warmup_steps}). Either raise max_steps or "
+            f"lower warmup_steps in configs/default.yaml."
+        )
+    if warmup_steps < 1:
+        raise ValueError(
+            f"warmup_steps ({warmup_steps}) must be >= 1. The first 50 "
+            f"steps also need to be free of predictive dampening (autopilot.py)."
+        )
+    return max_steps, warmup_steps
+
+
 class buselLossEngine:
     def __init__(self, vocab_size=259):
         self.vocab_size = vocab_size

@@ -136,8 +136,9 @@ class buselAutoPilot:
             return
         with torch.no_grad():
             for p in model.parameters():
-                if p.grad is not None:
-                    grad_norm = p.grad.norm().item()
-                    if grad_norm > 1e-5:
-                        noise = torch.randn_like(p.grad) * (self.noise_scale * grad_norm)
-                        p.grad.add_(noise)
+                if p.grad is None:
+                    continue
+                grad_norm = p.grad.norm()
+                mask = (grad_norm > 1e-5).to(p.grad.dtype)
+                noise = torch.randn_like(p.grad) * (self.noise_scale * grad_norm)
+                p.grad.add_(noise * mask)
