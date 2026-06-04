@@ -18,6 +18,7 @@ import torch.nn as nn
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data.pipeline import get_busel_dataloader
+from multimodal.special_tokens import vocab_size as _vocab_size
 from model.patching import StridedFastBLTPatcher
 from model.backbone import buselModel
 from training.optimizer import buselOptimizerEngine
@@ -206,22 +207,25 @@ class StablebuselProfiler:
             layer_time = 0.0
             mres_time = 0.0
             x = patches
-            prev_outputs = []
-            
+            n_hyper = getattr(model, "n_hyper", 2)
+            streams = [x] * n_hyper  # pad with input copies (matches buselModel.forward)
+
             with torch.autocast(device_type=self.device, dtype=torch.float16 if self.device == "mps" else torch.bfloat16):
                 for i, layer in enumerate(model.layers):
-                    # Измеряем декодерный слой
+                    # Измеряем mAR (pre-mixing, как в buselModel.forward)
                     t0 = time.perf_counter()
-                    x, aux = layer(x)
-                    if self.device == "mps": torch.mps.synchronize()
-                    layer_time += (time.perf_counter() - t0)
-                    
-                    # Измеряем mAR
-                    t0 = time.perf_counter()
-                    prev_outputs.append(x)
-                    x = model.m_residuals[i](x, prev_outputs)
+                    mixed = model.m_residuals[i](x, streams)
                     if self.device == "mps": torch.mps.synchronize()
                     mres_time += (time.perf_counter() - t0)
+
+                    # Измеряем декодерный слой
+                    t0 = time.perf_counter()
+                    x, aux = layer(mixed)
+                    if self.device == "mps": torch.mps.synchronize()
+                    layer_time += (time.perf_counter() - t0)
+
+                    # Обновляем streams (FIFO shift, length stays = n_hyper)
+                    streams = list(streams[1:]) + [x]
             
             timings["attention_moe_layers"].append(layer_time)
             timings["m_residuals"].append(mres_time)
@@ -370,7 +374,7 @@ def main():
 
     # Конфигурация для замера скорости (ziaziulia)
     class Config:
-        vocab_size = 259
+        vocab_size = _vocab_size()
         d_model = 256
         n_layers = 12
         n_heads = 4
