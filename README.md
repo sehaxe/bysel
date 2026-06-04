@@ -69,15 +69,17 @@ uv add docling              # PDF support
 # 3. Compile the Rust byte-streamer into the venv
 uv run maturin develop --release
 
-# 4. Drop training data into data_train/ (or download via CLI)
-cp ~/my_corpus.txt data_train/
-# Or:
-uv run python cli.py download-all --preset shpak
-# Or, for multimodal test files (image/video/audio/docx — no internet):
-uv run python cli.py download-multimodal --limit 8
+# 4. (Optional) Drop your own data into data_train/, OR use the 1-click data + train workflow:
+#    a) Download all 4 HF data presets (3 SFT + 1 DPO):
+uv run python cli.py download-data
+#    b) Run the full multi-stage pipeline (pretrain → SFT → DPO → eval):
+uv run python cli.py train-all
 
-# 5. Train the 52 M-param Shpak profile end-to-end
+# 5. Or train a single profile the legacy way:
 uv run train.py --profile shpak
+
+# 6. (Optional) Drop multimodal files (image/video/audio/docx) for any-to-text:
+uv run python cli.py download-multimodal --limit 8
 ```
 
 That's the whole pipeline. The first run is slow because `torch.compile`
