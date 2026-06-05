@@ -54,6 +54,8 @@ class buselPretrainConfig:
     grad_accum_steps: int = 1
     learning_rate_muon: float = 0.0006
     learning_rate_adamw: float = 0.00006
+    use_ema: bool = False
+    ema_decay: float = 0.999
 
     @classmethod
     def from_profile(cls, profile_dict: dict) -> "buselPretrainConfig":
@@ -72,6 +74,8 @@ class buselPretrainConfig:
         cfg.grad_accum_steps = int(t.get("grad_accum_steps", cfg.grad_accum_steps))
         cfg.learning_rate_muon = float(t.get("learning_rate_muon", cfg.learning_rate_muon))
         cfg.learning_rate_adamw = float(t.get("learning_rate_adamw", cfg.learning_rate_adamw))
+        cfg.use_ema = bool(t.get("use_ema", cfg.use_ema))
+        cfg.ema_decay = float(t.get("ema_decay", cfg.ema_decay))
         if cfg.d_model % cfg.n_hyper != 0:
             raise ValueError(
                 f"d_model ({cfg.d_model}) must be divisible by n_hyper ({cfg.n_hyper})!"
@@ -151,6 +155,7 @@ class buselPretrainStage:
         self.no_compile: bool = False
         self.compile_mode: str = "default"
         self.no_checkpointing: bool = False
+        self.ema: Any = None
         self._logger: Any = None
 
     def setup(
@@ -162,6 +167,9 @@ class buselPretrainStage:
         no_compile: bool = False,
         compile_mode: str = "default",
         no_checkpointing: bool = False,
+        use_ema: bool | None = None,
+        ema_decay: float | None = None,
+        **kwargs,
     ) -> None:
         """Initialize model + optimizer + dataloader for pretraining.
 
@@ -175,6 +183,11 @@ class buselPretrainStage:
             compile_mode: torch.compile mode (default|reduce-overhead|max-autotune).
             no_checkpointing: Disable gradient checkpointing.
         """
+        stage_params = kwargs.pop("stage_params", None) or {}
+        if use_ema is None:
+            use_ema = stage_params.get("use_ema")
+        if ema_decay is None:
+            ema_decay = stage_params.get("ema_decay")
         if isinstance(profile, str):
             with open("configs/default.yaml", "r", encoding="utf-8") as f:
                 full = yaml.safe_load(f)
@@ -190,6 +203,10 @@ class buselPretrainStage:
         self.no_compile = no_compile
         self.compile_mode = compile_mode
         self.no_checkpointing = no_checkpointing
+        if use_ema is not None:
+            self.cfg.use_ema = bool(use_ema)
+        if ema_decay is not None:
+            self.cfg.ema_decay = float(ema_decay)
 
         _enforce_stability()
         self._logger = setup_logging()
@@ -279,11 +296,18 @@ class buselPretrainStage:
         )
         self.loss_engine = buselLossEngine(self.cfg.vocab_size)
 
+        if self.cfg.use_ema:
+            from training.optimizer import EMA
+            self.ema = EMA(self.model, decay=self.cfg.ema_decay)
+            print(f"📈 EMA enabled: decay={self.cfg.ema_decay}")
+
         if resume and os.path.exists(resume):
             checkpoint = torch.load(resume, map_location=self.device)
             from model.checkpoint import load_state_dict_safely
             load_state_dict_safely(self.model, checkpoint["model_state_dict"])
             load_state_dict_safely(self.patcher, checkpoint["patcher_state_dict"])
+            if self.ema is not None and "ema_state_dict" in checkpoint:
+                self.ema.load_state_dict(checkpoint["ema_state_dict"])
             if checkpoint.get("step") != "emergency_backup":
                 self.start_step = checkpoint["step"]
                 self.start_file_idx = checkpoint.get("file_idx", 0)
@@ -444,6 +468,8 @@ class buselPretrainStage:
                 self.autopilot.inject_noise(self.model)
             current_lr, _ = self.autopilot.update_parameters(step, accumulated_loss, self.cfg.max_steps)
             self.opt_engine.step()
+            if self.ema is not None:
+                self.ema.update(self.model)
 
             if self._emergency_save_requested["value"]:
                 os.makedirs("checkpoints", exist_ok=True)
@@ -539,20 +565,20 @@ class buselPretrainStage:
         os.makedirs("checkpoints", exist_ok=True)
         checkpoint_path = f"checkpoints/busel_{self.profile_name}_step_{step}.pt"
         temp_path = checkpoint_path + ".tmp"
+        ckpt = {
+            "model_state_dict": self.model.state_dict(),
+            "patcher_state_dict": self.patcher.state_dict(),
+            "step": step,
+            "file_idx": last_file_idx,
+            "byte_offset": last_byte_offset,
+            "loss": accumulated_loss,
+            "lr_muon": current_lr,
+            "profile": self.profile_name,
+        }
+        if self.ema is not None:
+            ckpt["ema_state_dict"] = self.ema.state_dict()
         try:
-            torch.save(
-                {
-                    "model_state_dict": self.model.state_dict(),
-                    "patcher_state_dict": self.patcher.state_dict(),
-                    "step": step,
-                    "file_idx": last_file_idx,
-                    "byte_offset": last_byte_offset,
-                    "loss": accumulated_loss,
-                    "lr_muon": current_lr,
-                    "profile": self.profile_name,
-                },
-                temp_path,
-            )
+            torch.save(ckpt, temp_path)
             file_size = os.path.getsize(temp_path)
             if file_size < 2_000_000:
                 os.remove(temp_path)
@@ -581,19 +607,19 @@ class buselPretrainStage:
 
         os.makedirs("checkpoints", exist_ok=True)
         final_path = f"checkpoints/busel_{self.profile_name}_FINAL.pt"
+        ckpt = {
+            "model_state_dict": self.model.state_dict(),
+            "patcher_state_dict": self.patcher.state_dict(),
+            "step": state.step,
+            "file_idx": self.global_current_file_idx,
+            "byte_offset": self.global_current_byte_offset,
+            "profile": self.profile_name,
+            "config": self.cfg.__dict__,
+        }
+        if self.ema is not None:
+            ckpt["ema_state_dict"] = self.ema.state_dict()
         try:
-            torch.save(
-                {
-                    "model_state_dict": self.model.state_dict(),
-                    "patcher_state_dict": self.patcher.state_dict(),
-                    "step": state.step,
-                    "file_idx": self.global_current_file_idx,
-                    "byte_offset": self.global_current_byte_offset,
-                    "profile": self.profile_name,
-                    "config": self.cfg.__dict__,
-                },
-                final_path,
-            )
+            torch.save(ckpt, final_path)
             print(f"💾 Final checkpoint: {final_path}")
             log_event(
                 "stage_complete",

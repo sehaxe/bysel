@@ -133,3 +133,45 @@ class buselOptimizerEngine:
     def step(self):
         if self.opt_muon is not None: self.opt_muon.step()
         self.opt_adamw.step()
+
+
+@register("optimizer", "ema")
+class EMA:
+    def __init__(self, model, decay: float = 0.999):
+        self.decay = decay
+        self._step_count = 0
+        self.shadow = {
+            k: v.detach().clone().float() if v.dtype.is_floating_point else v.detach().clone()
+            for k, v in model.state_dict().items()
+        }
+
+    @torch.no_grad()
+    def update(self, model):
+        self._step_count += 1
+        for k, v in model.state_dict().items():
+            if v.dtype.is_floating_point:
+                self.shadow[k].mul_(self.decay).add_(v.detach().float(), alpha=1.0 - self.decay)
+
+    @torch.no_grad()
+    def apply_shadow(self, model) -> dict:
+        backup = {k: v.detach().clone() for k, v in model.state_dict().items()}
+        sd = model.state_dict()
+        for k in sd:
+            if sd[k].dtype.is_floating_point:
+                sd[k].copy_(self.shadow[k].to(sd[k].dtype))
+        return backup
+
+    @torch.no_grad()
+    def restore(self, model, backup: dict):
+        sd = model.state_dict()
+        for k in sd:
+            sd[k].copy_(backup[k].to(sd[k].dtype))
+
+    def state_dict(self) -> dict:
+        return self.shadow
+
+    def load_state_dict(self, sd: dict):
+        self.shadow = {
+            k: (v.float() if v.dtype.is_floating_point else v.clone())
+            for k, v in sd.items()
+        }
