@@ -15,6 +15,8 @@ import time
 import signal
 import math
 import json
+import glob
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -120,6 +122,7 @@ class buselPretrainConfig:
     inductor_cache_clean: bool = False
     inductor_cache_max_gb: float = 0.0
     dynamic_compile: bool = True
+    keep_last_n: int = 5
 
     @classmethod
     def from_profile(cls, profile_dict: dict) -> "buselPretrainConfig":
@@ -159,6 +162,7 @@ class buselPretrainConfig:
         cfg.inductor_cache_clean = bool(p.get("inductor_cache_clean", cfg.inductor_cache_clean))
         cfg.inductor_cache_max_gb = float(p.get("inductor_cache_max_gb", cfg.inductor_cache_max_gb))
         cfg.dynamic_compile = bool(p.get("dynamic_compile", cfg.dynamic_compile))
+        cfg.keep_last_n = int(p.get("keep_last_n", cfg.keep_last_n))
         if cfg.d_model % cfg.n_hyper != 0:
             raise ValueError(
                 f"d_model ({cfg.d_model}) must be divisible by n_hyper ({cfg.n_hyper})!"
@@ -502,6 +506,7 @@ class buselPretrainStage:
         last_log_tokens = 0
         current_chunk_size = self.cfg.chunk_size // 4
         current_batch_size = self.cfg.batch_size
+        self._spd_window: list[float] = []
         cumulative_processed_tokens = (
             self.start_step * current_batch_size * self.cfg.grad_accum_steps * current_chunk_size
         )
@@ -660,9 +665,24 @@ class buselPretrainStage:
                 last_log_time = current_time
                 last_log_tokens = cumulative_processed_tokens
 
+                steps_per_s = 10.0 / elapsed_interval if elapsed_interval > 0 else 0.0
+                self._spd_window.append(steps_per_s)
+                if len(self._spd_window) > 30:
+                    self._spd_window = self._spd_window[-30:]
+                avg_steps_per_s = sum(self._spd_window) / len(self._spd_window) if self._spd_window else steps_per_s
+                remaining = max(0, self.cfg.max_steps - step)
+                eta_s = remaining / avg_steps_per_s if avg_steps_per_s > 0 else 0.0
+
                 vram_mb = 0.0
                 if self.device == "cuda":
                     vram_mb = torch.cuda.max_memory_allocated() / 1024**2
+
+                if eta_s >= 3600:
+                    eta_str = f"{int(eta_s // 3600)}h {int((eta_s % 3600) // 60):02d}m"
+                elif eta_s >= 60:
+                    eta_str = f"{int(eta_s // 60)}m {int(eta_s % 60):02d}s"
+                else:
+                    eta_str = f"{int(eta_s)}s"
 
                 print(
                     f"Step {step:05d}/{self.cfg.max_steps:05d} | "
@@ -673,6 +693,7 @@ class buselPretrainStage:
                     f"Batch: {current_batch_size} | "
                     f"{speed:.0f} tokens/s"
                     + (f" | VRAM: {vram_mb:.0f}MB" if self.device == "cuda" else "")
+                    + f" | ETA: {eta_str}"
                 )
 
                 os.makedirs("checkpoints", exist_ok=True)
@@ -750,6 +771,9 @@ class buselPretrainStage:
                     loss=round(accumulated_loss, 4),
                     lr=round(current_lr, 7),
                 )
+                deleted = _cleanup_old_checkpoints(self.profile_name, getattr(self.cfg, "keep_last_n", 5))
+                if deleted:
+                    print(f"🧹 Checkpoint rotation: kept last {getattr(self.cfg, 'keep_last_n', 5)}, deleted {deleted} old (frees ~{deleted * 443} MB)")
         except Exception as e:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
@@ -789,3 +813,47 @@ class buselPretrainStage:
             print(f"❌ Failed to save final checkpoint: {e}")
 
         return state
+
+
+def _cleanup_old_checkpoints(profile_name: str, keep_last_n: int) -> int:
+    """Keep only the most recent `keep_last_n` scheduled checkpoints for this profile.
+
+    Scheduled checkpoints follow the pattern `busel_<profile>_step_<N>.pt`.
+    The FINAL checkpoint (`busel_<profile>_FINAL.pt`) and emergency backups
+    (`latest_crash_backup.pt`) are NEVER touched.
+
+    Returns the number of files deleted. Returns 0 if keep_last_n <= 0
+    (caller asked to keep everything) or if there is nothing to clean up.
+    """
+    if keep_last_n <= 0:
+        return 0
+    pattern = f"checkpoints/busel_{profile_name}_step_*.pt"
+    files = glob.glob(pattern)
+    if len(files) <= keep_last_n:
+        return 0
+    step_re = re.compile(r"_step_(\d+)\.pt$")
+
+    def _step_of(path: str) -> int:
+        m = step_re.search(path)
+        return int(m.group(1)) if m else -1
+
+    files.sort(key=_step_of)
+    to_delete = files[:-keep_last_n] if len(files) > keep_last_n else []
+    deleted = 0
+    bytes_freed = 0
+    for f in to_delete:
+        try:
+            size = os.path.getsize(f)
+            os.remove(f)
+            deleted += 1
+            bytes_freed += size
+        except OSError:
+            pass
+    if deleted > 0:
+        log_event(
+            "checkpoint_cleanup",
+            deleted=deleted,
+            kept=keep_last_n,
+            freed_mb=round(bytes_freed / 1024 / 1024, 2),
+        )
+    return deleted

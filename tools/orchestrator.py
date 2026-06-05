@@ -270,8 +270,9 @@ def plan_escalation(target: str, max_steps: int | None = None, vram_gb: float = 
       - Chinchilla: D_pretrain = 80 × N_params bytes
       - Time per step ∝ batch × ctx × params (linear in tokens × model size)
       - max_steps capped at chin_cap × Chinchilla steps to avoid overtraining small models
-      - batch_size, chunk_size, step_ms_est all read from `configs/default.yaml` profile
-        (no hardcoded safety caps — user owns the config)
+       - batch_size, chunk_size read from `configs/default.yaml` profile
+         (no hardcoded safety caps, no pre-baked step-time estimate — ETA
+          is computed in real time from observed step throughput)
     """
     if target not in PROFILE_LADDER:
         raise ValueError(f"target must be one of {PROFILE_LADDER}, got {target!r}")
@@ -288,7 +289,6 @@ def plan_escalation(target: str, max_steps: int | None = None, vram_gb: float = 
         prof = _load_profile_block(profile)
         chunk_size = int(prof["data"]["chunk_size"])
         batch_size = int(prof["data"]["batch_size"])
-        step_ms = int(prof.get("perf", {}).get("step_ms_est", 250))
         tokens_per_step = batch_size * (chunk_size // 4)
         chin_tokens = CHINCHILLA[profile]
         chin_steps = int(chin_tokens / tokens_per_step)
@@ -298,15 +298,12 @@ def plan_escalation(target: str, max_steps: int | None = None, vram_gb: float = 
             candidates.append(per_stage_cap)
         max_steps_actual = min(candidates)
         chin_pct = 100.0 * (max_steps_actual * tokens_per_step) / chin_tokens
-        est_h = max_steps_actual * step_ms / 1000 / 3600
         stages.append(
             {
                 "profile": profile,
                 "batch_size": batch_size,
                 "chunk_size": chunk_size,
                 "max_steps": max_steps_actual,
-                "est_h": est_h,
-                "step_ms": step_ms,
                 "chinchilla_pct": chin_pct,
             }
         )
@@ -314,7 +311,7 @@ def plan_escalation(target: str, max_steps: int | None = None, vram_gb: float = 
     return {"target": target, "ladder": ladder, "stages": stages, "vram_gb": vram_gb, "max_steps": max_steps}
 
 
-def _write_escalation_yaml(plan: dict, path: str, recompile: bool = False) -> None:
+def _write_escalation_yaml(plan: dict, path: str, recompile: bool = False, resume: str | None = None) -> None:
     import yaml as _yaml
 
     stages_yaml = []
@@ -332,6 +329,7 @@ def _write_escalation_yaml(plan: dict, path: str, recompile: bool = False) -> No
             {
                 "name": "pretrain",
                 "data_preset": s["profile"],
+                "resume": resume,
                 "checkpoint_out": f"checkpoints/busel_escalate_{s['profile']}_FINAL.pt",
                 "params": params,
             }
@@ -352,10 +350,10 @@ def _print_escalation_plan(plan: dict) -> None:
     cap_text = f"max_steps={plan['max_steps']}" if plan.get("max_steps") else "as long as possible (Chinchilla)"
     typer.echo(typer.style(f"   target: {plan['target']} | ladder: {' → '.join(plan['ladder'])} | VRAM={plan['vram_gb']:.0f} GB | {cap_text}", fg=typer.colors.CYAN))
     typer.echo("")
-    typer.echo(f"   {'profile':>8} {'est_h':>7} {'max_steps':>11} {'batch':>6} {'chunk':>6} {'chin_%':>7}")
+    typer.echo(f"   {'profile':>8} {'max_steps':>11} {'batch':>6} {'chunk':>6} {'chin_%':>7}    eta: real-time (in run log)")
     for s in plan["stages"]:
         typer.echo(
-            f"   {s['profile']:>8} {s['est_h']:>7.2f} {s['max_steps']:>11,} {s['batch_size']:>6} {s['chunk_size']:>6} {s['chinchilla_pct']:>6.1f}%"
+            f"   {s['profile']:>8} {s['max_steps']:>11,} {s['batch_size']:>6} {s['chunk_size']:>6} {s['chinchilla_pct']:>6.1f}%"
         )
     typer.echo("")
 
@@ -365,6 +363,7 @@ def escalate(
     max_steps: int | None = typer.Option(None, "--max-steps", help="Cap total training across all stages (default: train to Chinchilla)"),
     vram_gb: float = typer.Option(16.0, "--vram", help="Available VRAM in GB (clamps batch_size)"),
     recompile: bool = typer.Option(False, "--recompile", help="Wipe Inductor cache before compiling (default: reuse cache)"),
+    resume: str | None = typer.Option(None, "--resume", "-r", help="Path to a checkpoint to resume from (e.g. checkpoints/busel_shpak_step_700.pt)"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print plan only, do not execute"),
 ):
     print_tui_header()
@@ -375,7 +374,7 @@ def escalate(
         return
     yaml_name = f".escalate-{target}-{max_steps}" if max_steps else f".escalate-{target}-chinchilla"
     yaml_path = f"configs/pipelines/{yaml_name}.yaml"
-    _write_escalation_yaml(plan, yaml_path, recompile=recompile)
+    _write_escalation_yaml(plan, yaml_path, recompile=recompile, resume=resume)
     typer.echo(typer.style(f"📝 Plan persisted to {yaml_path}", fg=typer.colors.GREEN))
     if recompile:
         typer.echo(typer.style("🔥 --recompile: Inductor cache will be wiped before compile.", fg=typer.colors.YELLOW))

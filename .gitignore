@@ -46,3 +46,6 @@ bun.lockb
 # --- Secrets ---
 .env
 .env.*
+
+# --- Runtime-generated pipeline shims (escalate/plan outputs) ---
+configs/pipelines/.escalate-*.yaml

@@ -115,11 +115,13 @@ profiles:
       dispersion_weight: 0.1
       dispersion_temperature: 2.0
     perf:
-      step_ms_est: 250
       inductor_cache_dir: "~/.cache/busel/inductor"
       inductor_cache_clean: false
       inductor_cache_max_gb: 0.0
+      keep_last_n: 5
+
       dynamic_compile: true
+      keep_last_n: 5
 
   shpak:
     model:
@@ -148,11 +150,11 @@ profiles:
       dispersion_weight: 0.1
       dispersion_temperature: 2.0
     perf:
-      step_ms_est: 380
       inductor_cache_dir: "~/.cache/busel/inductor"
       inductor_cache_clean: false
       inductor_cache_max_gb: 0.0
       dynamic_compile: true
+      keep_last_n: 5
 
   zubr:
     model:
@@ -182,11 +184,11 @@ profiles:
       dispersion_weight: 0.1
       dispersion_temperature: 2.0
     perf:
-      step_ms_est: 800
       inductor_cache_dir: "~/.cache/busel/inductor"
       inductor_cache_clean: false
       inductor_cache_max_gb: 0.0
       dynamic_compile: true
+      keep_last_n: 5
 
   shpak:
     model:
@@ -215,10 +217,10 @@ profiles:
       dispersion_weight: 0.1
       dispersion_temperature: 2.0
     perf:
-      step_ms_est: 380
       inductor_cache_dir: "~/.cache/busel/inductor"
       inductor_cache_clean: false
       inductor_cache_max_gb: 0.0
+      keep_last_n: 5
 
   zubr:
     model:
@@ -248,7 +250,6 @@ profiles:
       dispersion_weight: 0.1
       dispersion_temperature: 2.0
     perf:
-      step_ms_est: 800
       inductor_cache_dir: "~/.cache/busel/inductor"
       inductor_cache_clean: false
       inductor_cache_max_gb: 0.0
