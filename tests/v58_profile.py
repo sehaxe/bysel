@@ -227,61 +227,18 @@ def mode_shpak_5run(device):
     return results
 
 
-def mode_shpak_sf(device):
-    print("🌀 busel SHPAK SCHEDULE-FREE PROFILER (v6.0 research validation)")
+def mode_shpak_v60(device):
+    print("🚀 busel SHPAK v6.0 CUMULATIVE PROFILER — builds the best config from validated winners")
     print("   Profile: shpak 52.8M params, batch=16 ctx=4096")
     print(f"   Steps per run: {N_MEASURE_5RUN} ({N_WARMUP_5RUN} warmup + {N_MEASURE_5RUN} measured)\n")
-    print("   ⚠️  SF uses γ_factor=2.0 (default). For best results set min_lr_ratio=1.0")
-    print("      in the profile to disable cosine — see AGENTS.md v6.0 SF section.\n")
-    runs = [
-        ("1. baseline (cosine)",                     {}),
-        ("2. + Schedule-Free (cosine)",              {"use_schedule_free": True}),
-        ("3. + SF + LCSB (cosine)",                  {"use_schedule_free": True, "selective_backward": True, "backward_ratio": 0.5}),
-    ]
-    results = []
-    for name, flags in runs:
-        try:
-            results.append(_run_one(name, "shpak", BATCH, n_warmup=N_WARMUP_5RUN, n_measure=N_MEASURE_5RUN, **flags, device=device))
-        except Exception as e:
-            print(f"   ❌ FAILED: {type(e).__name__}: {e}")
-            results.append({"name": name, "error": str(e)})
-    _print_table("SHPAK SCHEDULE-FREE COMPARISON (52.8M, batch=16 ctx=4096, 10 steps)", results)
-    return results
-
-
-def mode_shpak_cautious(device):
-    print("🛡️ busel SHPAK CAUTIOUS PROFILER (v6.0 research validation)")
-    print("   Profile: shpak 52.8M params, batch=16 ctx=4096")
-    print(f"   Steps per run: {N_MEASURE_5RUN} ({N_WARMUP_5RUN} warmup + {N_MEASURE_5RUN} measured)\n")
+    print("   Each run adds one opt-in feature (all opt-in via buselPretrainConfig).")
+    print("   For best SF results set min_lr_ratio=1.0 in profile to disable cosine interference.\n")
     runs = [
         ("1. baseline",                              {}),
-        ("2. + Cautious",                            {"use_cautious": True}),
-        ("3. + Cautious + LCSB",                     {"use_cautious": True, "selective_backward": True, "backward_ratio": 0.5}),
-        ("4. + Cautious + SF + LCSB",                {"use_cautious": True, "use_schedule_free": True, "selective_backward": True, "backward_ratio": 0.5}),
-    ]
-    results = []
-    for name, flags in runs:
-        try:
-            results.append(_run_one(name, "shpak", BATCH, n_warmup=N_WARMUP_5RUN, n_measure=N_MEASURE_5RUN, **flags, device=device))
-        except Exception as e:
-            print(f"   ❌ FAILED: {type(e).__name__}: {e}")
-            results.append({"name": name, "error": str(e)})
-    _print_table("SHPAK CAUTIOUS COMPARISON (52.8M, batch=16 ctx=4096, 10 steps)", results)
-    return results
-
-
-def mode_shpak_diff_attn(device):
-    print("🪞 busel SHPAK DIFFERENTIAL-ATTENTION PROFILER (v6.0 research validation)")
-    print("   Profile: shpak 52.8M params, batch=16 ctx=4096")
-    print(f"   Steps per run: {N_MEASURE_5RUN} ({N_WARMUP_5RUN} warmup + {N_MEASURE_5RUN} measured)\n")
-    print("   DA replaces 25% MLA layers' softmax attn with (A1 - A2)·V diff.")
-    print("   Paper: 35% better intelligence/param (i.e., 65% params for same quality).")
-    print("   No measured step-time cost on shpak 52.8M (only MLA layers, 2 of 8).\n")
-    runs = [
-        ("1. baseline (MLA)",                        {}),
-        ("2. + Differential Attn (DA)",              {"use_differential_attention": True}),
-        ("3. + DA + LCSB",                           {"use_differential_attention": True, "selective_backward": True, "backward_ratio": 0.5}),
+        ("2. + DA",                                  {"use_differential_attention": True}),
+        ("3. + DA + Cautious",                       {"use_differential_attention": True, "use_cautious": True}),
         ("4. + DA + Cautious + LCSB",                {"use_differential_attention": True, "use_cautious": True, "selective_backward": True, "backward_ratio": 0.5}),
+        ("5. + DA + Cautious + SF + LCSB (full)",    {"use_differential_attention": True, "use_cautious": True, "use_schedule_free": True, "selective_backward": True, "backward_ratio": 0.5}),
     ]
     results = []
     for name, flags in runs:
@@ -290,27 +247,7 @@ def mode_shpak_diff_attn(device):
         except Exception as e:
             print(f"   ❌ FAILED: {type(e).__name__}: {e}")
             results.append({"name": name, "error": str(e)})
-    _print_table("SHPAK DIFF-ATTN COMPARISON (52.8M, batch=16 ctx=4096, 10 steps)", results)
-    return results
-
-
-def mode_shpak_pairs(device):
-    print("🧪 busel SHPAK PAIR-INTERACTION PROFILER (v5.8)")
-    print("   Profile: shpak 52.8M params, batch=16 ctx=4096")
-    print(f"   Steps per run: {N_MEASURE_5RUN} ({N_WARMUP_5RUN} warmup + {N_MEASURE_5RUN} measured)\n")
-    runs = [
-        ("1. baseline",          {}),
-        ("2. + LCSB ratio=0.5",  {"selective_backward": True, "backward_ratio": 0.5}),
-        ("3. + Sparse + LCSB",   {"sparse_6_8": True, "selective_backward": True, "backward_ratio": 0.5}),
-    ]
-    results = []
-    for name, flags in runs:
-        try:
-            results.append(_run_one(name, "shpak", BATCH, n_warmup=N_WARMUP_5RUN, n_measure=N_MEASURE_5RUN, **flags, device=device))
-        except Exception as e:
-            print(f"   ❌ FAILED: {type(e).__name__}: {e}")
-            results.append({"name": name, "error": str(e)})
-    _print_table("SHPAK PAIR-INTERACTION COMPARISON (52.8M, batch=16 ctx=4096, 10 steps)", results)
+    _print_table("SHPAK v6.0 CUMULATIVE COMPARISON (52.8M, batch=16 ctx=4096, 10 steps)", results)
     return results
 
 
@@ -340,7 +277,7 @@ def mode_scale_3sizes(device):
 
 def main():
     parser = argparse.ArgumentParser(description="busel v5.8 profile suite")
-    parser.add_argument("--mode", choices=["shpak-5run", "shpak-pairs", "shpak-sf", "shpak-cautious", "shpak-diff-attn", "scale-3sizes"],
+    parser.add_argument("--mode", choices=["shpak-5run", "shpak-v60", "scale-3sizes"],
                         default="shpak-5run", help="Which comparison to run (default: shpak-5run)")
     parser.add_argument("--out", default="checkpoints/v58_profile.json",
                         help="Output JSON path (default: checkpoints/v58_profile.json)")
@@ -349,14 +286,8 @@ def main():
     device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
     if args.mode == "shpak-5run":
         results = mode_shpak_5run(device)
-    elif args.mode == "shpak-pairs":
-        results = mode_shpak_pairs(device)
-    elif args.mode == "shpak-sf":
-        results = mode_shpak_sf(device)
-    elif args.mode == "shpak-cautious":
-        results = mode_shpak_cautious(device)
-    elif args.mode == "shpak-diff-attn":
-        results = mode_shpak_diff_attn(device)
+    elif args.mode == "shpak-v60":
+        results = mode_shpak_v60(device)
     else:
         results = mode_scale_3sizes(device)
 
