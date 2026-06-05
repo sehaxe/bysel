@@ -134,9 +134,24 @@ class buselOptimizerEngine:
     """Hybrid Muon (2D weight params, no router/embed) + AdamW (1D/norm/bias/embed/router)."""
 
     _MUON_EXCLUDE = ("router", "embed")
+    _LR_GROUPS = ("attn", "ffn", "mtp", "norm", "embed", "router")
+
+    @staticmethod
+    def _classify_param(name: str) -> str:
+        n = name.lower()
+        if "router" in n: return "router"
+        if "embed" in n: return "embed"
+        if "norm" in n: return "norm"
+        if "mtp" in n: return "mtp"
+        if "ffn" in n or "blackboard" in n: return "ffn"
+        if any(t in n for t in ("q_proj", "k_proj", "v_proj", "o_proj", "qkv", "wk", "wv", "wq")):
+            return "attn"
+        if "moe" in n: return "ffn"
+        return "attn"
 
     def __init__(self, model, lr_muon=0.002, lr_adamw=0.0002,
-                 optimizer_type="muon", lotus_rank=8, lotus_lr_scale=0.5):
+                 optimizer_type="muon", lotus_rank=8, lotus_lr_scale=0.5,
+                 lr_multipliers=None):
         muon_params = []
         adamw_params = []
         for name, param in model.named_parameters():
@@ -147,36 +162,59 @@ class buselOptimizerEngine:
                 and all(token not in name for token in self._MUON_EXCLUDE)
             )
             if is_muon_param:
-                muon_params.append(param)
+                muon_params.append((name, param))
             else:
-                adamw_params.append(param)
+                adamw_params.append((name, param))
+
+        mults = dict(lr_multipliers or {})
+        for k in self._LR_GROUPS:
+            mults.setdefault(k, 1.0)
+        self._lr_mults = mults
+
+        def _build_subgroups(items):
+            groups: dict[str, list] = {k: [] for k in self._LR_GROUPS}
+            for name, p in items:
+                groups[self._classify_param(name)].append(p)
+            out = []
+            for k, params in groups.items():
+                if params:
+                    out.append({"params": params, "lr_mult": mults[k], "name": k})
+            return out
 
         if len(muon_params) > 0:
+            muon_groups = _build_subgroups(muon_params)
             if optimizer_type == "lotus_muon":
                 print(f"🪷 [LOTUS-MUON]: rank={lotus_rank}, lr_scale={lotus_lr_scale} — "
                       f"~{10.0 / max(1, lotus_rank):.1f}x optimizer-state memory reduction")
                 self.opt_muon = LotusMuon(
-                    muon_params, lr=lr_muon, momentum=0.95,
+                    muon_groups, lr=lr_muon, momentum=0.95,
                     rank=lotus_rank, lr_scale=lotus_lr_scale,
                 )
             elif HAS_FLASH_MUON and torch.cuda.is_available():
                 print("🚀 [CUDA ULTRA-SPEED]: Активирован Triton-оптимизатор Flash-Muon!")
-                self.opt_muon = FlashMuon(muon_params, lr=lr_muon, momentum=0.95)
+                self.opt_muon = FlashMuon(muon_groups, lr=lr_muon, momentum=0.95)
             else:
-                self.opt_muon = Muon(muon_params, lr=lr_muon, momentum=0.95)
+                self.opt_muon = Muon(muon_groups, lr=lr_muon, momentum=0.95)
         else:
             self.opt_muon = None
-            adamw_params.extend(muon_params)
 
-        self.opt_adamw = torch.optim.AdamW(adamw_params, lr=lr_adamw, weight_decay=0.01)
+        if self.opt_muon is None:
+            adamw_groups = _build_subgroups(muon_params + adamw_params)
+        else:
+            adamw_groups = _build_subgroups(adamw_params)
+
+        self.opt_adamw = torch.optim.AdamW(adamw_groups, lr=lr_adamw, weight_decay=0.01)
         self.optimizer_type = optimizer_type
-        n_muon = sum(p.numel() for p in muon_params)
-        n_adamw = sum(p.numel() for p in adamw_params)
+
+        n_muon = sum(p.numel() for _, p in muon_params)
+        n_adamw = sum(p.numel() for _, p in adamw_params)
         n_total = n_muon + n_adamw
         if n_total > 0:
+            mults_str = " | ".join(f"{k}={v:.2f}" for k, v in mults.items() if v != 1.0)
+            suffix = f"  ⚖️  LR mults: {mults_str}" if mults_str else ""
             print(f"⚙️  Hybrid optimiser routing: {n_muon:,} → {optimizer_type} "
                   f"({100.0 * n_muon / n_total:.1f}%), {n_adamw:,} → AdamW "
-                  f"({100.0 * n_adamw / n_total:.1f}%)")
+                  f"({100.0 * n_adamw / n_total:.1f}%){suffix}")
 
     def zero_grad(self, set_to_none: bool = True):
         if self.opt_muon is not None: self.opt_muon.zero_grad(set_to_none=set_to_none)

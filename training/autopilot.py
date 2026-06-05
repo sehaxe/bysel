@@ -122,9 +122,9 @@ class buselAutoPilot:
         
         if self.opt_engine.opt_muon is not None:
             for pg in self.opt_engine.opt_muon.param_groups:
-                pg['lr'] = new_lr_muon
+                pg['lr'] = new_lr_muon * pg.get('lr_mult', 1.0)
             for pg in self.opt_engine.opt_adamw.param_groups:
-                pg['lr'] = new_lr_adamw
+                pg['lr'] = new_lr_adamw * pg.get('lr_mult', 1.0)
                 
         if self.recovery_countdown == 0:
             self.noise_scale *= self.noise_decay

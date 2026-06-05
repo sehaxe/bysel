@@ -59,6 +59,7 @@ class buselPretrainConfig:
     optimizer_type: str = "muon"
     lotus_rank: int = 8
     lotus_lr_scale: float = 0.5
+    lr_multipliers: Any = None
 
     @classmethod
     def from_profile(cls, profile_dict: dict) -> "buselPretrainConfig":
@@ -82,6 +83,7 @@ class buselPretrainConfig:
         cfg.optimizer_type = str(t.get("optimizer_type", cfg.optimizer_type))
         cfg.lotus_rank = int(t.get("lotus_rank", cfg.lotus_rank))
         cfg.lotus_lr_scale = float(t.get("lotus_lr_scale", cfg.lotus_lr_scale))
+        cfg.lr_multipliers = t.get("lr_multipliers", None)
         if cfg.d_model % cfg.n_hyper != 0:
             raise ValueError(
                 f"d_model ({cfg.d_model}) must be divisible by n_hyper ({cfg.n_hyper})!"
@@ -178,6 +180,7 @@ class buselPretrainStage:
         optimizer_type: str | None = None,
         lotus_rank: int | None = None,
         lotus_lr_scale: float | None = None,
+        lr_multipliers: Any = None,
         **kwargs,
     ) -> None:
         """Initialize model + optimizer + dataloader for pretraining.
@@ -203,6 +206,8 @@ class buselPretrainStage:
             lotus_rank = stage_params.get("lotus_rank")
         if lotus_lr_scale is None:
             lotus_lr_scale = stage_params.get("lotus_lr_scale")
+        if lr_multipliers is None:
+            lr_multipliers = stage_params.get("lr_multipliers")
         if isinstance(profile, str):
             with open("configs/default.yaml", "r", encoding="utf-8") as f:
                 full = yaml.safe_load(f)
@@ -228,6 +233,8 @@ class buselPretrainStage:
             self.cfg.lotus_rank = int(lotus_rank)
         if lotus_lr_scale is not None:
             self.cfg.lotus_lr_scale = float(lotus_lr_scale)
+        if lr_multipliers is not None:
+            self.cfg.lr_multipliers = dict(lr_multipliers)
 
         _enforce_stability()
         self._logger = setup_logging()
@@ -309,6 +316,7 @@ class buselPretrainStage:
             optimizer_type=self.cfg.optimizer_type,
             lotus_rank=self.cfg.lotus_rank,
             lotus_lr_scale=self.cfg.lotus_lr_scale,
+            lr_multipliers=self.cfg.lr_multipliers,
         )
         self.autopilot = buselAutoPilot(
             self.opt_engine,

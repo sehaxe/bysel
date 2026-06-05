@@ -1170,8 +1170,8 @@ class TestbuselFramework(unittest.TestCase):
 
         model = MockM()
         engine = buselOptimizerEngine(model, lr_muon=0.01, lr_adamw=0.001)
-        muon_param_ids = {id(p) for p in engine.opt_muon.param_groups[0]['params']}
-        adamw_param_ids = {id(p) for p in engine.opt_adamw.param_groups[0]['params']}
+        muon_param_ids = {id(p) for pg in engine.opt_muon.param_groups for p in pg['params']}
+        adamw_param_ids = {id(p) for pg in engine.opt_adamw.param_groups for p in pg['params']}
         for name, p in model.named_parameters():
             in_muon = id(p) in muon_param_ids
             in_adamw = id(p) in adamw_param_ids
