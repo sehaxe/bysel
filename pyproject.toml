@@ -19,8 +19,14 @@ dependencies = [
     "soundfile>=0.13.1",
     "imageio[ffmpeg]>=2.37.3",
     "opencv-python-headless>=4.13.0.92",
-    "torch>=2.12.0",
 ]
+
+[project.optional-dependencies]
+cpu   = ["torch>=2.5.0"]
+cu118 = ["torch>=2.5.0"]
+cu126 = ["torch>=2.5.0"]
+cu128 = ["torch>=2.5.0"]
+cu130 = ["torch>=2.5.0"]
 
 [build-system]
 requires = ["maturin>=1.13.3,<2.0"]
@@ -32,15 +38,44 @@ features = ["pyo3/extension-module"]
 manifest-path = "busel_rust_io/Cargo.toml"
 python-source = "busel_rust_io"
 
+[tool.uv]
+conflicts = [
+    [
+        { extra = "cpu" },
+        { extra = "cu118" },
+        { extra = "cu126" },
+        { extra = "cu128" },
+        { extra = "cu130" },
+    ],
+]
+
 [tool.uv.sources]
 torch = [
-    { index = "pytorch-cpu",  marker = "sys_platform != 'linux'" },
-    { index = "pytorch-cu130", marker = "sys_platform == 'linux'" },
+    { index = "pytorch-cpu",   extra = "cpu" },
+    { index = "pytorch-cu118", extra = "cu118" },
+    { index = "pytorch-cu126", extra = "cu126" },
+    { index = "pytorch-cu128", extra = "cu128" },
+    { index = "pytorch-cu130", extra = "cu130" },
 ]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu118"
+url = "https://download.pytorch.org/whl/cu118"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [[tool.uv.index]]

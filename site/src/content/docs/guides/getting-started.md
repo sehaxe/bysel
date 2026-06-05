@@ -24,30 +24,46 @@ all-in-one Python package manager. If you don't have it:
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-Then sync the environment:
+Then sync the environment with the **extra** that matches your hardware.
+The extras are mutually exclusive — only one is selected per `uv sync`:
+
+| Extra    | Hardware                          | Driver  | Torch | Approx. size |
+|----------|-----------------------------------|---------|-------|-------------:|
+| `cpu`    | no GPU / Apple Silicon            | n/a     | 2.12  | ≈ 700 MB     |
+| `cu118`  | NVIDIA Turing / RTX 20xx          | ≥ 470   | 2.7   | ≈ 1.5 GB     |
+| `cu126`  | NVIDIA Ampere / RTX 30xx          | ≥ 535   | 2.9   | ≈ 2.0 GB     |
+| `cu128`  | NVIDIA Ada / RTX 40xx             | ≥ 545   | 2.9   | ≈ 2.2 GB     |
+| `cu130`  | NVIDIA Blackwell / RTX 50xx       | ≥ 555   | 2.12  | ≈ 2.5 GB     |
+
+The **`scripts/setup.sh`** auto-detects your GPU (NVIDIA → `cu130`,
+otherwise → `cpu`):
 
 ```bash
-uv sync
+./scripts/setup.sh          # auto-detect
+./scripts/setup.sh cu128    # force a specific extra
 ```
 
-This creates a `.venv/` with all Python dependencies. The PyTorch
-wheel is picked automatically per platform via `[tool.uv.sources]`
-markers in `pyproject.toml`:
+…or run the underlying commands yourself:
 
-| Platform  | Wheel source | Approx. size |
-|-----------|--------------|-------------:|
-| Linux     | `pytorch-cu130` (CUDA 13.0) | ≈ 2.5 GB |
-| macOS     | `pytorch-cpu` (MPS works fine) | ≈ 700 MB |
-| Windows   | `pytorch-cpu` | ≈ 700 MB |
+```bash
+uv sync --extra cu130
+uv run maturin develop --release
+```
 
 import { Aside } from '@astrojs/starlight/components';
 
-<Aside type="tip" title="Force CPU on Linux">
-If you are on Linux without an NVIDIA GPU and want to skip the
-~1.8 GB of CUDA libraries, edit `pyproject.toml` and swap the
-`sys_platform == 'linux'` marker on the `pytorch-cu130` source to
-`sys_platform == 'never'`. On macOS / Windows the CPU wheel is
-selected automatically — no override is needed.
+<Aside type="caution" title="AMD ROCm is not yet supported">
+The `pytorch-triton-rocm 3.x` dependency that all `torch==2.7+rocm6.3`
+builds reference does not exist on PyPI — the rocm6.3 index is broken
+upstream. AMD users should use the `cpu` extra for now. (Busel inference
+still works on AMD via the Rust ternary matmul extension — only training
+requires the right torch wheel.)
+</Aside>
+
+<Aside type="tip" title="Switching hardware later">
+Each `uv sync --extra <name>` swaps the torch wheel in-place (uninstalls
+nvidia-* packages for `cpu`, reinstalls them for `cu130`, etc.). The rest
+of the dependency tree is identical. Verified on Linux + RTX 5060 Ti.
 </Aside>
 
 To add the optional PDF reader (Docling) which lets the data loader
@@ -67,10 +83,11 @@ into the active venv with maturin:
 uv run maturin develop --release
 ```
 
-If you skip this step, the Python fallback in `data/pipeline.py` will
-be used automatically — slower, but functionally identical for small
-files. The data loader's `HAS_RUST_IO` flag controls which path is
-used.
+If you used `scripts/setup.sh` in step 2, this was already run for
+you. If you skip this step, the Python fallback in `data/pipeline.py`
+will be used automatically — slower, but functionally identical for
+small files. The data loader's `HAS_RUST_IO` flag controls which path
+is used.
 
 ## 4. Drop data into `data_train/`
 

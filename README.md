@@ -83,12 +83,19 @@ the whole thing in an afternoon.
 
 ```bash
 # 1. Install Python deps (uses uv)
-#    PyTorch wheel is picked automatically per platform:
-#      • Linux   → CUDA 13.0 wheel from pytorch-cu130  (≈ 2.5 GB)
-#      • macOS   → CPU wheel from pytorch-cpu          (≈ 700 MB, MPS works fine)
-#      • Windows → CPU wheel from pytorch-cpu          (≈ 700 MB)
-#    Override for CPU on Linux (e.g. no NVIDIA GPU): see "Manual install" below.
-uv sync
+#    Pick the extra that matches your hardware:
+#      • cpu    — no GPU (works on Linux/macOS/Windows)
+#      • cu118  — NVIDIA driver ≥ 470 (legacy GPUs)
+#      • cu126  — NVIDIA driver ≥ 535
+#      • cu128  — NVIDIA driver ≥ 545
+#      • cu130  — NVIDIA driver ≥ 555  (RTX 5060 Ti / Blackwell)
+#    AMD ROCm is currently broken upstream (pytorch-triton-rocm 3.x dep).
+#    Auto-detect (NVIDIA → cu130, otherwise → cpu):
+./scripts/setup.sh
+#    Or pick explicitly:
+uv sync --extra cu130       # default for modern NVIDIA
+uv sync --extra cpu         # no GPU
+uv sync --extra cu128       # driver too old for cu130
 
 # 2. (Optional) Add PDF + vision support
 uv add docling              # PDF support
@@ -96,13 +103,7 @@ uv add docling              # PDF support
 
 # 3. Compile the Rust byte-streamer into the venv
 uv run maturin develop --release
-
-# Manual install (CPU-only on Linux):
-#   The default pyproject.toml routes Linux → CUDA 13.0. To force a ~700 MB CPU
-#   install on Linux, edit the [tool.uv.sources] `torch` list to use
-#   `pytorch-cpu` for the `sys_platform == 'linux'` marker, then `uv sync`.
-#   On macOS / Windows the CPU wheel is selected automatically — no override
-#   needed.
+# (setup.sh does this automatically)
 
 # 4. (Optional) Drop your own data into data_train/, OR use the 1-click data + train workflow:
 #    a) Download all 4 HF data presets (3 SFT + 1 DPO):
@@ -223,13 +224,17 @@ the Chinchilla byte-law `D ≈ 80 × N` divided by `batch × ctx / 4`.
 
 ## Hardware support
 
-| Device | Precision | Notes |
-|--------|-----------|-------|
-| CUDA   | bf16      | Recommended. Full TF32 + cudnn.benchmark. |
-| MPS    | fp16      | Apple Silicon. No `torch.profiler` (hangs). |
-| CPU    | bf16      | Slowest, but trains. Inference-only path uses Rust ternary matmul (no GPU required). |
+| Device | Extra    | Driver  | Notes |
+|--------|----------|---------|-------|
+| NVIDIA Blackwell / RTX 50xx | `cu130` | ≥ 555 | Tested on RTX 5060 Ti 16 GB. PyTorch 2.12 + CUDA 13.0. |
+| NVIDIA Ada / RTX 40xx       | `cu128` | ≥ 545 | PyTorch 2.9. |
+| NVIDIA Ampere+ / RTX 30xx+  | `cu126` | ≥ 535 | PyTorch 2.9. |
+| NVIDIA Turing / RTX 20xx    | `cu118` | ≥ 470 | PyTorch 2.7. Legacy. |
+| Apple Silicon (MPS)         | `cpu`   | n/a   | Wheel auto-selected on macOS. No `torch.profiler` (hangs). |
+| CPU-only Linux / Windows    | `cpu`   | n/a   | ~700 MB torch, no CUDA. |
+| AMD ROCm                    | —       | —     | Broken upstream (pytorch-triton-rocm 3.x not on PyPI). Use `cpu` extra on AMD. |
 
-Tested on **NVIDIA RTX 5060 Ti (16 GB, sm_120)** with PyTorch 2.12 + CUDA 13.0.
+All NVIDIA extras use bf16 + cudnn.benchmark. CPU inference uses the Rust ternary matmul extension (no GPU required).
 
 ---
 

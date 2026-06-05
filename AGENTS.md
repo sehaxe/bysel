@@ -135,6 +135,7 @@ All 6 profiles in `configs/default.yaml` (validation, micro_test, quick_test, ch
 - **Shrink `config.vocab_size` below `multimodal.special_tokens.vocab_size()`** — `buselModel.__init__` raises `ValueError`. Catches stale YAML.
 - **Commit `data_train/`, `checkpoints/`, `.env`, `Cargo.lock`, `target/`** — all gitignored. The `.gitignore` is the single source of truth for what to never commit; do not duplicate that list in a NEVER rule.
 - **Commit without explicit user request** — always wait for `commit` / `push` / `merge` instruction.
+- **Use `sys_platform` markers in `[tool.uv.sources]`** — the 5 explicit extras (`cpu` / `cu118` / `cu126` / `cu128` / `cu130`) are the supported way to pick hardware. Markers force every Linux user to CUDA 13.0, which fails the "different cards" requirement (Linux may have any NVIDIA / AMD / Intel / no GPU). If you need to add a new variant, add an extra + index, not a marker. **AMD ROCm is intentionally absent** — the rocm6.3 index depends on `pytorch-triton-rocm 3.x` which doesn't exist on PyPI (broken upstream); AMD users should run `uv sync --extra cpu` until that's fixed.
 
 ## UNIQUE STYLES
 - **Emoji-prefixed module headers:** every Python file starts with `"""🦩 / ⚙️ / 💡 / 📚 / 🤖 / 🎯 / 🛸 ..."""` docstring.
@@ -146,10 +147,14 @@ All 6 profiles in `configs/default.yaml` (validation, micro_test, quick_test, ch
 
 ## COMMANDS
 ```bash
-# Setup
-uv sync                     # auto: Linux→CUDA 13.0, macOS/Windows→CPU
-uv add docling              # PDF support for data loader
-uv run maturin develop --release   # Build Rust ext into venv
+# Setup (extras are mutually exclusive — pick one per machine)
+./scripts/setup.sh                    # auto-detect: NVIDIA→cu130, else→cpu + maturin
+./scripts/setup.sh cu128              # or pick a specific extra
+uv sync --extra cu130                 # explicit, modern NVIDIA
+uv sync --extra cpu                   # no GPU / Apple Silicon / AMD
+uv sync --extra cu118                 # legacy NVIDIA (driver ≥ 470)
+uv add docling                        # PDF support for data loader
+uv run maturin develop --release      # Build Rust ext into venv (auto-run by setup.sh)
 
 # Data
 uv run python cli.py download-all --preset shpak
