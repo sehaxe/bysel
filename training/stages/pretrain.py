@@ -56,6 +56,9 @@ class buselPretrainConfig:
     learning_rate_adamw: float = 0.00006
     use_ema: bool = False
     ema_decay: float = 0.999
+    optimizer_type: str = "muon"
+    lotus_rank: int = 8
+    lotus_lr_scale: float = 0.5
 
     @classmethod
     def from_profile(cls, profile_dict: dict) -> "buselPretrainConfig":
@@ -76,6 +79,9 @@ class buselPretrainConfig:
         cfg.learning_rate_adamw = float(t.get("learning_rate_adamw", cfg.learning_rate_adamw))
         cfg.use_ema = bool(t.get("use_ema", cfg.use_ema))
         cfg.ema_decay = float(t.get("ema_decay", cfg.ema_decay))
+        cfg.optimizer_type = str(t.get("optimizer_type", cfg.optimizer_type))
+        cfg.lotus_rank = int(t.get("lotus_rank", cfg.lotus_rank))
+        cfg.lotus_lr_scale = float(t.get("lotus_lr_scale", cfg.lotus_lr_scale))
         if cfg.d_model % cfg.n_hyper != 0:
             raise ValueError(
                 f"d_model ({cfg.d_model}) must be divisible by n_hyper ({cfg.n_hyper})!"
@@ -169,6 +175,9 @@ class buselPretrainStage:
         no_checkpointing: bool = False,
         use_ema: bool | None = None,
         ema_decay: float | None = None,
+        optimizer_type: str | None = None,
+        lotus_rank: int | None = None,
+        lotus_lr_scale: float | None = None,
         **kwargs,
     ) -> None:
         """Initialize model + optimizer + dataloader for pretraining.
@@ -188,6 +197,12 @@ class buselPretrainStage:
             use_ema = stage_params.get("use_ema")
         if ema_decay is None:
             ema_decay = stage_params.get("ema_decay")
+        if optimizer_type is None:
+            optimizer_type = stage_params.get("optimizer_type")
+        if lotus_rank is None:
+            lotus_rank = stage_params.get("lotus_rank")
+        if lotus_lr_scale is None:
+            lotus_lr_scale = stage_params.get("lotus_lr_scale")
         if isinstance(profile, str):
             with open("configs/default.yaml", "r", encoding="utf-8") as f:
                 full = yaml.safe_load(f)
@@ -207,6 +222,12 @@ class buselPretrainStage:
             self.cfg.use_ema = bool(use_ema)
         if ema_decay is not None:
             self.cfg.ema_decay = float(ema_decay)
+        if optimizer_type is not None:
+            self.cfg.optimizer_type = str(optimizer_type)
+        if lotus_rank is not None:
+            self.cfg.lotus_rank = int(lotus_rank)
+        if lotus_lr_scale is not None:
+            self.cfg.lotus_lr_scale = float(lotus_lr_scale)
 
         _enforce_stability()
         self._logger = setup_logging()
@@ -285,6 +306,9 @@ class buselPretrainStage:
             self.model,
             lr_muon=self.cfg.learning_rate_muon,
             lr_adamw=self.cfg.learning_rate_adamw,
+            optimizer_type=self.cfg.optimizer_type,
+            lotus_rank=self.cfg.lotus_rank,
+            lotus_lr_scale=self.cfg.lotus_lr_scale,
         )
         self.autopilot = buselAutoPilot(
             self.opt_engine,

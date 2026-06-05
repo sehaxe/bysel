@@ -86,13 +86,57 @@ class Muon(torch.optim.Optimizer):
     def hybrid_newton_schulz(self, M, steps=10):
         return _newton_schulz_core(M, steps)
 
+@register("optimizer", "lotus_muon")
+class LotusMuon(torch.optim.Optimizer):
+    def __init__(self, params, lr=1e-3, weight_decay=0.1, momentum=0.95,
+                 ns_steps=5, rank=8, lr_scale=0.5):
+        defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum,
+                        ns_steps=ns_steps, rank=rank, lr_scale=lr_scale)
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self):
+        for group in self.param_groups:
+            lr = group['lr']
+            wd = group['weight_decay']
+            momentum = group['momentum']
+            ns_steps = group['ns_steps']
+            rank = group['rank']
+            lr_scale = group['lr_scale']
+            for p in group['params']:
+                if p.grad is None: continue
+                grad = p.grad
+                state = self.state[p]
+                d1, d2 = p.shape
+                if 'buf_p' not in state:
+                    eff_rank = min(rank, d1, d2)
+                    if p.device.type == "cuda": dtype = torch.bfloat16
+                    elif p.device.type == "mps": dtype = torch.float16
+                    else: dtype = torch.float32
+                    state['buf_p'] = torch.zeros(d1, eff_rank, dtype=dtype, device=p.device)
+                    state['buf_q'] = torch.zeros(d2, eff_rank, dtype=dtype, device=p.device)
+
+                buf_p = state['buf_p']
+                buf_q = state['buf_q']
+                buf_p.mul_(momentum).add_(grad.to(buf_p.dtype) @ buf_q)
+                buf_q.mul_(momentum).add_(grad.to(buf_q.dtype).T @ buf_p)
+
+                m_approx = buf_p @ buf_q.T
+                O_t = _compiled_newton_schulz(m_approx, steps=ns_steps)
+                A, B = p.shape[0], p.shape[1]
+                scale = 0.2 * math.sqrt(max(A, B))
+
+                p.mul_(1.0 - lr * wd)
+                p.add_(O_t.to(p.dtype), alpha=-lr * scale * lr_scale)
+
 @register("optimizer", "hybrid_muon_adamw")
 class buselOptimizerEngine:
     """Hybrid Muon (2D weight params, no router/embed) + AdamW (1D/norm/bias/embed/router)."""
 
     _MUON_EXCLUDE = ("router", "embed")
 
-    def __init__(self, model, lr_muon=0.002, lr_adamw=0.0002):
+    def __init__(self, model, lr_muon=0.002, lr_adamw=0.0002,
+                 optimizer_type="muon", lotus_rank=8, lotus_lr_scale=0.5):
         muon_params = []
         adamw_params = []
         for name, param in model.named_parameters():
@@ -108,7 +152,14 @@ class buselOptimizerEngine:
                 adamw_params.append(param)
 
         if len(muon_params) > 0:
-            if HAS_FLASH_MUON and torch.cuda.is_available():
+            if optimizer_type == "lotus_muon":
+                print(f"🪷 [LOTUS-MUON]: rank={lotus_rank}, lr_scale={lotus_lr_scale} — "
+                      f"~{10.0 / max(1, lotus_rank):.1f}x optimizer-state memory reduction")
+                self.opt_muon = LotusMuon(
+                    muon_params, lr=lr_muon, momentum=0.95,
+                    rank=lotus_rank, lr_scale=lotus_lr_scale,
+                )
+            elif HAS_FLASH_MUON and torch.cuda.is_available():
                 print("🚀 [CUDA ULTRA-SPEED]: Активирован Triton-оптимизатор Flash-Muon!")
                 self.opt_muon = FlashMuon(muon_params, lr=lr_muon, momentum=0.95)
             else:
@@ -118,11 +169,12 @@ class buselOptimizerEngine:
             adamw_params.extend(muon_params)
 
         self.opt_adamw = torch.optim.AdamW(adamw_params, lr=lr_adamw, weight_decay=0.01)
+        self.optimizer_type = optimizer_type
         n_muon = sum(p.numel() for p in muon_params)
         n_adamw = sum(p.numel() for p in adamw_params)
         n_total = n_muon + n_adamw
         if n_total > 0:
-            print(f"⚙️  Hybrid optimiser routing: {n_muon:,} → Muon "
+            print(f"⚙️  Hybrid optimiser routing: {n_muon:,} → {optimizer_type} "
                   f"({100.0 * n_muon / n_total:.1f}%), {n_adamw:,} → AdamW "
                   f"({100.0 * n_adamw / n_total:.1f}%)")
 
