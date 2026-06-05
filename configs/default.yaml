@@ -12,7 +12,7 @@ profiles:
       n_heads: 4
       expert_hidden: 256
       num_experts: 2
-      top_k: 2
+      top_k: 1
       vocab_size: 326        # 256 raw bytes + 3 legacy + 67 plug-in specials
     data:
       data_path: "data_train"
@@ -35,7 +35,7 @@ profiles:
       n_heads: 4
       expert_hidden: 256
       num_experts: 2         # 2 experts for speed
-      top_k: 2
+      top_k: 1
       vocab_size: 326        # 256 raw bytes + 3 legacy + 67 plug-in specials
     data:
       data_path: "data_train"
@@ -58,7 +58,7 @@ profiles:
       n_heads: 4
       expert_hidden: 256
       num_experts: 2
-      top_k: 2
+      top_k: 1
       vocab_size: 326        # 256 raw bytes + 3 legacy + 67 plug-in specials
     data:
       data_path: "data_train"
@@ -80,7 +80,7 @@ profiles:
       n_heads: 3            # 3 головы (192 / 3 = 64)
       expert_hidden: 384    # 2 * d_model
       num_experts: 4        # 4 эксперта MoE
-      top_k: 2
+      top_k: 1
       vocab_size: 326        # 256 raw bytes + 3 legacy + 67 plug-in specials
     data:
       data_path: "data_train"
@@ -102,7 +102,7 @@ profiles:
       n_heads: 6
       expert_hidden: 768
       num_experts: 4
-      top_k: 2
+      top_k: 1
       vocab_size: 326        # 256 raw bytes + 3 legacy + 67 plug-in specials
     data:
       data_path: "data_train"
@@ -124,7 +124,7 @@ profiles:
       n_heads: 6
       expert_hidden: 1024
       num_experts: 8
-      top_k: 2
+      top_k: 1
       vocab_size: 326        # 256 raw bytes + 3 legacy + 67 plug-in specials
       n_hyper: 4
     data:

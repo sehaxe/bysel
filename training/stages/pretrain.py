@@ -41,7 +41,7 @@ class buselPretrainConfig:
     n_heads: int = 4
     expert_hidden: int = 256
     num_experts: int = 2
-    top_k: int = 2
+    top_k: int = 1
     vocab_size: int = 326
     n_hyper: int = 2
     data_path: str = "data_train"
@@ -54,9 +54,9 @@ class buselPretrainConfig:
     grad_accum_steps: int = 1
     learning_rate_muon: float = 0.0006
     learning_rate_adamw: float = 0.00006
-    use_ema: bool = False
+    use_ema: bool = True
     ema_decay: float = 0.999
-    optimizer_type: str = "muon"
+    optimizer_type: str = "lotus_muon"
     lotus_rank: int = 8
     lotus_lr_scale: float = 0.5
     lr_multipliers: Any = None

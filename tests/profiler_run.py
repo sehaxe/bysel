@@ -357,6 +357,19 @@ def main():
                         help="Profiler backend: auto (torch on CUDA, custom on MPS/CPU), custom (manual perf_counter, stable everywhere), torch (torch.profiler, hangs on MPS — CUDA only).")
     parser.add_argument("--trace", type=str, default="checkpoints/busel_profiler_trace.json",
                         help="Output path for torch.profiler Chrome trace (only used with --backend torch).")
+    parser.add_argument("--optimizer-type", type=str, default="lotus_muon",
+                        choices=["muon", "lotus_muon"],
+                        help="Muon variant: 'lotus_muon' (default, rank-r factorised) or 'muon' (fp32 NS×5, kept for ablation).")
+    parser.add_argument("--lotus-rank", type=int, default=8,
+                        help="Rank for lotus_muon (default 8, paper recommendation).")
+    parser.add_argument("--lotus-lr-scale", type=float, default=0.5,
+                        help="LR scale for lotus_muon (default 0.5, paper recommendation).")
+    parser.add_argument("--top-k", type=int, default=1,
+                        help="MoE top_k: 1 (default, ~35%% routed-FFN FLOP cut) or 2 for ensemble effect.")
+    parser.add_argument("--no-grad-ckpt", action="store_true",
+                        help="Disable gradient checkpointing (full activation memory, no recompute).")
+    parser.add_argument("--steps", type=int, default=10,
+                        help="Number of profiling steps (default 10).")
     args = parser.parse_args()
 
     device = "mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
@@ -370,7 +383,13 @@ def main():
         print(f"⚠️  --backend torch is only safe on CUDA (current device: {device.upper()}). Falling back to custom.")
         backend = "custom"
 
-    print(f"🖥️  Device: {device.upper()}  |  Profiler backend: {backend}")
+    flags_summary = (
+        f"optimizer={args.optimizer_type}"
+        f"{f'(rank={args.lotus_rank})' if args.optimizer_type == 'lotus_muon' else ''}"
+        f" | top_k={args.top_k}"
+        f" | grad_ckpt={'off' if args.no_grad_ckpt else 'on(every=2)'}"
+    )
+    print(f"🖥️  Device: {device.upper()}  |  Profiler backend: {backend}  |  {flags_summary}")
 
     # Конфигурация для замера скорости (ziaziulia)
     class Config:
@@ -380,14 +399,14 @@ def main():
         n_heads = 4
         expert_hidden = 512
         num_experts = 4
-        top_k = 2
+        top_k = args.top_k
         batch_size = 4
         chunk_size = 512
         data_path = "data_train"
         learning_rate_muon = 0.0004
         learning_rate_adamw = 0.00004
         weight_decay = 0.1
-        
+
     cfg = Config()
     
     # Подготовка временных данных для замера
@@ -415,7 +434,14 @@ def main():
                 if hasattr(module, "weight") and module.weight is not None:
                     module.weight.data = module.weight.data.to(target_dtype)
                     
-    opt_engine = buselOptimizerEngine(model, lr_muon=cfg.learning_rate_muon, lr_adamw=cfg.learning_rate_adamw)
+    opt_engine = buselOptimizerEngine(
+        model,
+        lr_muon=cfg.learning_rate_muon,
+        lr_adamw=cfg.learning_rate_adamw,
+        optimizer_type=args.optimizer_type,
+        lotus_rank=args.lotus_rank,
+        lotus_lr_scale=args.lotus_lr_scale,
+    )
     loss_engine = buselLossEngine(cfg.vocab_size)
     autopilot = buselAutoPilot(
         opt_engine,
@@ -423,18 +449,21 @@ def main():
         max_lr_adamw=cfg.learning_rate_adamw,
         target_wd=cfg.weight_decay
     )
+
+    if not args.no_grad_ckpt and device == "cuda":
+        model.enable_gradient_checkpointing(every=2)
     
     # Запуск
     total_params = sum(p.numel() for p in model.parameters())
 
     try:
         if backend == "custom":
-            profiler = StablebuselProfiler(device=device, steps=10)
+            profiler = StablebuselProfiler(device=device, steps=args.steps)
             timings = profiler.run_profiling(model, patcher, dataloader_iter, opt_engine, loss_engine, autopilot, cfg)
             memory_stats = profiler.get_memory_stats()
             profiler.print_report(timings, memory_stats, total_params, cfg)
         elif backend == "torch":
-            torch_profiler = StablebuselTorchProfiler(device=device, steps=10, trace_path=args.trace)
+            torch_profiler = StablebuselTorchProfiler(device=device, steps=args.steps, trace_path=args.trace)
             memory_stats, prof = torch_profiler.run_profiling(model, patcher, dataloader_iter, opt_engine, loss_engine, cfg)
             torch_profiler.print_report(memory_stats, prof, total_params, cfg)
         else:
