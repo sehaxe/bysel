@@ -115,7 +115,10 @@ profiles:
       dispersion_weight: 0.1
       dispersion_temperature: 2.0
     perf:
-      step_ms_est: 250      # Калибруй под свой HW; используется только для ETA в escalate
+      step_ms_est: 250
+      inductor_cache_dir: "~/.cache/busel/inductor"
+      inductor_cache_clean: true
+      inductor_cache_max_gb: 0.0
 
   shpak:
     model:
@@ -144,7 +147,10 @@ profiles:
       dispersion_weight: 0.1
       dispersion_temperature: 2.0
     perf:
-      step_ms_est: 380      # Калибруй под свой HW; используется только для ETA в escalate
+      step_ms_est: 380
+      inductor_cache_dir: "~/.cache/busel/inductor"
+      inductor_cache_clean: true
+      inductor_cache_max_gb: 0.0
 
   zubr:
     model:
@@ -174,4 +180,7 @@ profiles:
       dispersion_weight: 0.1
       dispersion_temperature: 2.0
     perf:
-      step_ms_est: 800      # Калибруй под свой HW; используется только для ETA в escalate
+      step_ms_est: 800
+      inductor_cache_dir: "~/.cache/busel/inductor"
+      inductor_cache_clean: true
+      inductor_cache_max_gb: 0.0

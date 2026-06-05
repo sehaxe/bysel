@@ -28,6 +28,50 @@ from busel_logging import setup_logging, log_event
 _STOP_FILE = os.environ.get("BUSEL_STOP_FILE", "/tmp/busel_stop")
 
 
+def _setup_inductor_cache(cache_dir: str, clean: bool, max_gb: float = 0.0) -> str:
+    import shutil
+
+    path = os.path.abspath(os.path.expanduser(cache_dir))
+    os.environ["TORCHINDUCTOR_CACHE_DIR"] = path
+    if clean and os.path.isdir(path):
+        for entry in os.listdir(path):
+            try:
+                p = os.path.join(path, entry)
+                if os.path.isdir(p):
+                    shutil.rmtree(p)
+                else:
+                    os.remove(p)
+            except OSError:
+                pass
+    os.makedirs(path, exist_ok=True)
+
+    if max_gb > 0:
+        entries = []
+        total = 0
+        for root, _dirs, files in os.walk(path):
+            for f in files:
+                fp = os.path.join(root, f)
+                try:
+                    sz = os.path.getsize(fp)
+                    entries.append((os.path.getmtime(fp), sz, fp))
+                    total += sz
+                except OSError:
+                    pass
+        cap_bytes = int(max_gb * 1024**3)
+        if total > cap_bytes:
+            entries.sort()
+            for _mtime, sz, fp in entries:
+                if total <= cap_bytes:
+                    break
+                try:
+                    os.remove(fp)
+                    total -= sz
+                except OSError:
+                    pass
+
+    return path
+
+
 @dataclass
 class buselPretrainConfig:
     """Subset of configs/default.yaml profile keys used by the pretrain stage.
@@ -72,6 +116,9 @@ class buselPretrainConfig:
     use_dispersion_loss: bool = False
     dispersion_weight: float = 0.1
     dispersion_temperature: float = 2.0
+    inductor_cache_dir: str = "~/.cache/busel/inductor"
+    inductor_cache_clean: bool = True
+    inductor_cache_max_gb: float = 0.0
 
     @classmethod
     def from_profile(cls, profile_dict: dict) -> "buselPretrainConfig":
@@ -79,6 +126,7 @@ class buselPretrainConfig:
         m = profile_dict.get("model", {})
         d = profile_dict.get("data", {})
         t = profile_dict.get("training", {})
+        p = profile_dict.get("perf", {})
         _apply_model_profile(cfg, m)
         cfg.data_path = d.get("data_path", cfg.data_path)
         cfg.chunk_size = int(d.get("chunk_size", cfg.chunk_size))
@@ -106,6 +154,9 @@ class buselPretrainConfig:
         cfg.use_dispersion_loss = bool(t.get("use_dispersion_loss", cfg.use_dispersion_loss))
         cfg.dispersion_weight = float(t.get("dispersion_weight", cfg.dispersion_weight))
         cfg.dispersion_temperature = float(t.get("dispersion_temperature", cfg.dispersion_temperature))
+        cfg.inductor_cache_dir = str(p.get("inductor_cache_dir", cfg.inductor_cache_dir))
+        cfg.inductor_cache_clean = bool(p.get("inductor_cache_clean", cfg.inductor_cache_clean))
+        cfg.inductor_cache_max_gb = float(p.get("inductor_cache_max_gb", cfg.inductor_cache_max_gb))
         if cfg.d_model % cfg.n_hyper != 0:
             raise ValueError(
                 f"d_model ({cfg.d_model}) must be divisible by n_hyper ({cfg.n_hyper})!"
@@ -276,6 +327,14 @@ class buselPretrainStage:
         _enforce_stability()
         self._logger = setup_logging()
         log_event("training_start", profile=profile_name)
+
+        cache_path = _setup_inductor_cache(
+            self.cfg.inductor_cache_dir,
+            self.cfg.inductor_cache_clean,
+            self.cfg.inductor_cache_max_gb,
+        )
+        log_event("inductor_cache_ready", path=cache_path, clean=self.cfg.inductor_cache_clean, max_gb=self.cfg.inductor_cache_max_gb)
+        print(f"🗂️  Inductor cache: {cache_path} (clean={self.cfg.inductor_cache_clean}, max_gb={self.cfg.inductor_cache_max_gb})")
 
         self.device = _detect_device()
 
