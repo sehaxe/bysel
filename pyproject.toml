@@ -11,7 +11,6 @@ dependencies = [
     "pandas>=3.0.3",
     "pyarrow>=24.0.0",
     "pyyaml>=6.0.3",
-    "torch>=2.12.0",
     "typer>=0.26.4",
     "pillow",
     "datasets>=4.8.5",
@@ -20,6 +19,7 @@ dependencies = [
     "soundfile>=0.13.1",
     "imageio[ffmpeg]>=2.37.3",
     "opencv-python-headless>=4.13.0.92",
+    "torch>=2.12.0",
 ]
 
 [build-system]
@@ -31,3 +31,19 @@ module-name = "busel"
 features = ["pyo3/extension-module"]
 manifest-path = "busel_rust_io/Cargo.toml"
 python-source = "busel_rust_io"
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu",  marker = "sys_platform != 'linux'" },
+    { index = "pytorch-cu130", marker = "sys_platform == 'linux'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true

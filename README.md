@@ -83,6 +83,11 @@ the whole thing in an afternoon.
 
 ```bash
 # 1. Install Python deps (uses uv)
+#    PyTorch wheel is picked automatically per platform:
+#      • Linux   → CUDA 13.0 wheel from pytorch-cu130  (≈ 2.5 GB)
+#      • macOS   → CPU wheel from pytorch-cpu          (≈ 700 MB, MPS works fine)
+#      • Windows → CPU wheel from pytorch-cpu          (≈ 700 MB)
+#    Override for CPU on Linux (e.g. no NVIDIA GPU): see "Manual install" below.
 uv sync
 
 # 2. (Optional) Add PDF + vision support
@@ -91,6 +96,13 @@ uv add docling              # PDF support
 
 # 3. Compile the Rust byte-streamer into the venv
 uv run maturin develop --release
+
+# Manual install (CPU-only on Linux):
+#   The default pyproject.toml routes Linux → CUDA 13.0. To force a ~700 MB CPU
+#   install on Linux, edit the [tool.uv.sources] `torch` list to use
+#   `pytorch-cpu` for the `sys_platform == 'linux'` marker, then `uv sync`.
+#   On macOS / Windows the CPU wheel is selected automatically — no override
+#   needed.
 
 # 4. (Optional) Drop your own data into data_train/, OR use the 1-click data + train workflow:
 #    a) Download all 4 HF data presets (3 SFT + 1 DPO):

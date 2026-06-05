@@ -30,9 +30,28 @@ Then sync the environment:
 uv sync
 ```
 
-This creates a `.venv/` with all Python dependencies. To add the
-optional PDF reader (Docling) which lets the data loader chew on
-`*.pdf` files:
+This creates a `.venv/` with all Python dependencies. The PyTorch
+wheel is picked automatically per platform via `[tool.uv.sources]`
+markers in `pyproject.toml`:
+
+| Platform  | Wheel source | Approx. size |
+|-----------|--------------|-------------:|
+| Linux     | `pytorch-cu130` (CUDA 13.0) | ≈ 2.5 GB |
+| macOS     | `pytorch-cpu` (MPS works fine) | ≈ 700 MB |
+| Windows   | `pytorch-cpu` | ≈ 700 MB |
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="Force CPU on Linux">
+If you are on Linux without an NVIDIA GPU and want to skip the
+~1.8 GB of CUDA libraries, edit `pyproject.toml` and swap the
+`sys_platform == 'linux'` marker on the `pytorch-cu130` source to
+`sys_platform == 'never'`. On macOS / Windows the CPU wheel is
+selected automatically — no override is needed.
+</Aside>
+
+To add the optional PDF reader (Docling) which lets the data loader
+chew on `*.pdf` files:
 
 ```bash
 uv add docling

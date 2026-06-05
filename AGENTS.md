@@ -147,7 +147,7 @@ All 6 profiles in `configs/default.yaml` (validation, micro_test, quick_test, ch
 ## COMMANDS
 ```bash
 # Setup
-uv sync
+uv sync                     # auto: Linux→CUDA 13.0, macOS/Windows→CPU
 uv add docling              # PDF support for data loader
 uv run maturin develop --release   # Build Rust ext into venv
 
