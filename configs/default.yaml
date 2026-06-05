@@ -101,8 +101,8 @@ profiles:
       backward_ratio: 0.5
     data:
       data_path: "data_train"
-      chunk_size: 512      # Рабочий контекст 2К
-      batch_size: 1400       # Возвращаем батч 512 (Auto-Batcher сам уменьшит его до 128 на контексте 2К)
+      chunk_size: 512
+      batch_size: 128
     training:
       max_steps: 1500       # Ограничиваем до 1500 шагов вместо "auto"
       warmup_steps: "auto"
@@ -114,6 +114,8 @@ profiles:
       use_dispersion_loss: false
       dispersion_weight: 0.1
       dispersion_temperature: 2.0
+    perf:
+      step_ms_est: 250      # Калибруй под свой HW; используется только для ETA в escalate
 
   shpak:
     model:
@@ -129,7 +131,7 @@ profiles:
     data:
       data_path: "data_train"
       chunk_size: 4096
-      batch_size: 128       # Стартовый батч для Shpak (52M параметров)
+      batch_size: 128
     training:
       max_steps: "auto"
       warmup_steps: "auto"
@@ -141,6 +143,8 @@ profiles:
       use_dispersion_loss: false
       dispersion_weight: 0.1
       dispersion_temperature: 2.0
+    perf:
+      step_ms_est: 380      # Калибруй под свой HW; используется только для ETA в escalate
 
   zubr:
     model:
@@ -157,7 +161,7 @@ profiles:
     data:
       data_path: "data_train"
       chunk_size: 16384
-      batch_size: 32        # Стартовый батч для Zubr (120M параметров)
+      batch_size: 32
     training:
       max_steps: "auto"
       warmup_steps: "auto"
@@ -169,3 +173,5 @@ profiles:
       use_dispersion_loss: false
       dispersion_weight: 0.1
       dispersion_temperature: 2.0
+    perf:
+      step_ms_est: 800      # Калибруй под свой HW; используется только для ETA в escalate

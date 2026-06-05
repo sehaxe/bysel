@@ -12,8 +12,18 @@ from tools.orchestrator import autopilot, train, train_all, profile, pipeline, e
 
 app = typer.Typer(
     help="busel Master CLI Engine - Sovereign 1-bit Omni-LLM",
-    rich_markup_mode="markdown"
+    rich_markup_mode="markdown",
+    invoke_without_command=True,
 )
+
+
+@app.callback()
+def _default_callback(ctx: typer.Context):
+    if ctx.invoked_subcommand is None:
+        typer.echo(typer.style("🪜 No subcommand → defaulting to `escalate --target shpak`", fg=typer.colors.CYAN, bold=True))
+        typer.echo(typer.style("   (batch/chunk/LR come from configs/default.yaml — edit there, not in code)\n", fg=typer.colors.CYAN))
+        escalate(target="shpak")
+
 
 # 📥 Регистрация команд подготовки данных
 app.command(name="download-all", help="📥 Bulk download and prepare ALL standard datasets (Text, SFT, Vision) at once.")(download_all)

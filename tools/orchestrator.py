@@ -250,8 +250,6 @@ def pipeline(
 
 PROFILE_LADDER = ["chyzh", "shpak", "zubr"]
 PROFILE_PARAMS = {"chyzh": 10_000_000, "shpak": 55_000_000, "zubr": 120_000_000}
-SAFE_BATCH = {"chyzh": 128, "shpak": 16, "zubr": 4}
-ESTIMATED_STEP_MS = {"chyzh": 250, "shpak": 380, "zubr": 800}
 CHINCHILLA = {p: 80 * n for p, n in PROFILE_PARAMS.items()}
 
 
@@ -272,7 +270,8 @@ def plan_escalation(target: str, max_steps: int | None = None, vram_gb: float = 
       - Chinchilla: D_pretrain = 80 × N_params bytes
       - Time per step ∝ batch × ctx × params (linear in tokens × model size)
       - max_steps capped at chin_cap × Chinchilla steps to avoid overtraining small models
-      - batch_size and chunk_size read from actual profile (not hardcoded)
+      - batch_size, chunk_size, step_ms_est all read from `configs/default.yaml` profile
+        (no hardcoded safety caps — user owns the config)
     """
     if target not in PROFILE_LADDER:
         raise ValueError(f"target must be one of {PROFILE_LADDER}, got {target!r}")
@@ -288,8 +287,8 @@ def plan_escalation(target: str, max_steps: int | None = None, vram_gb: float = 
     for profile in ladder:
         prof = _load_profile_block(profile)
         chunk_size = int(prof["data"]["chunk_size"])
-        batch_size = int(SAFE_BATCH.get(profile) or prof["data"]["batch_size"])
-        step_ms = ESTIMATED_STEP_MS[profile]
+        batch_size = int(prof["data"]["batch_size"])
+        step_ms = int(prof.get("perf", {}).get("step_ms_est", 250))
         tokens_per_step = batch_size * (chunk_size // 4)
         chin_tokens = CHINCHILLA[profile]
         chin_steps = int(chin_tokens / tokens_per_step)
