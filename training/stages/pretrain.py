@@ -66,6 +66,7 @@ class buselPretrainConfig:
     use_schedule_free: bool = False
     sf_beta: float = 0.9
     sf_gamma_factor: float = 2.0
+    use_cautious: bool = False
 
     @classmethod
     def from_profile(cls, profile_dict: dict) -> "buselPretrainConfig":
@@ -96,6 +97,7 @@ class buselPretrainConfig:
         cfg.use_schedule_free = bool(t.get("use_schedule_free", cfg.use_schedule_free))
         cfg.sf_beta = float(t.get("sf_beta", cfg.sf_beta))
         cfg.sf_gamma_factor = float(t.get("sf_gamma_factor", cfg.sf_gamma_factor))
+        cfg.use_cautious = bool(t.get("use_cautious", cfg.use_cautious))
         if cfg.d_model % cfg.n_hyper != 0:
             raise ValueError(
                 f"d_model ({cfg.d_model}) must be divisible by n_hyper ({cfg.n_hyper})!"
@@ -332,6 +334,7 @@ class buselPretrainStage:
             use_schedule_free=self.cfg.use_schedule_free,
             sf_beta=self.cfg.sf_beta,
             sf_gamma_factor=self.cfg.sf_gamma_factor,
+            use_cautious=self.cfg.use_cautious,
         )
         self.autopilot = buselAutoPilot(
             self.opt_engine,

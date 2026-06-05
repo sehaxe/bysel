@@ -18,6 +18,7 @@ tests/
 | Compare 4 configs on shpak 52.8M (baseline / +Sparse / +LCSB / +Sparse+LCSB) | `v58_profile.py --mode shpak-5run` | **🆕 v5.8** — 2 warmup + 10 measured steps, batch=16 ctx=4096. Prints deltas vs baseline. |
 | Compare pair interactions on shpak 52.8M (baseline / +LCSB / +Sparse+LCSB) | `v58_profile.py --mode shpak-pairs` | **🆕 v5.8** — prints pair-overhead on top of LCSB alone. |
 | Compare 3 SF configs on shpak 52.8M (baseline / +SF / +SF+LCSB) | `v58_profile.py --mode shpak-sf` | **🆕 v6.0** — SF overhead at 10 steps is +1.2% (paper's 2-3× convergence benefit only shows at 50+ steps). Use `min_lr_ratio=1.0` in profile to disable cosine interference. |
+| Compare 4 Cautious configs on shpak 52.8M (baseline / +Cautious / +Cautious+LCSB / +Cautious+SF+LCSB) | `v58_profile.py --mode shpak-cautious` | **🆕 v6.0** — Cautious+LCSB is the v6.0 winner: -44% step, -32% mem, best loss at 10 steps. |
 | Scale 3 model sizes (micro_test/shpak/zubr) | `v58_profile.py --mode scale-3sizes` | **🆕 v5.8** — uniform batch=16 ctx=4096; 4 configs × 3 sizes. |
 | Add memory metric | `profiler_run.py` → `get_memory_stats` | CUDA / MPS / RSS-by-platform |
 | Skip test on CUDA-only | use `cls.device` from `setUpClass` | `mps → cuda → cpu` priority |
@@ -67,6 +68,7 @@ tests/
   9. `test_sparse_bitnet_6_8` — **🆕 v5.8** — `BitLinear_a4_8(is_sparse_6_8=True)` forward+backward non-NaN, gradient density > 50%, flag is set
   10. `test_lcsb_selective_backward` — **🆕 v5.8** — `buselModel(selective_backward=True, backward_ratio=0.5)` on n_layers=6 selects 3 layers, gradients non-NaN, `_selected_layers` set correctly
   11. `test_schedule_free_wrapper` — **🆕 v6.0** — 5-step SF sanity check: state['x'/'z'/'t'] present, no NaN, loss decreased, state_dict round-trip works
+  12. `test_cautious_wrapper` — **🆕 v6.0** — 5-step Cautious sanity check: no NaN, loss decreased, state_dict round-trip works
 - **Profiler runs `tests/profiler_run.py` standalone:** Called by `cli.py profile` and `autopilot`
 - **Memory in profiler:** Different stats per device — not a single unified schema
 - **Step phases measured:** `forward`, `backward`, `optimizer.step`, `autopilot.update_parameters`, `autopilot.inject_noise`

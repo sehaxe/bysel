@@ -152,7 +152,8 @@ class buselOptimizerEngine:
     def __init__(self, model, lr_muon=0.002, lr_adamw=0.0002,
                  optimizer_type="muon", lotus_rank=8, lotus_lr_scale=0.5,
                  lr_multipliers=None, use_schedule_free=False,
-                 sf_beta=0.9, sf_gamma_factor=2.0):
+                 sf_beta=0.9, sf_gamma_factor=2.0,
+                 use_cautious=False):
         muon_params = []
         adamw_params = []
         for name, param in model.named_parameters():
@@ -207,6 +208,11 @@ class buselOptimizerEngine:
         self.opt_adamw = torch.optim.AdamW(adamw_groups, lr=lr_adamw, weight_decay=0.01)
         self.optimizer_type = optimizer_type
         self.use_schedule_free = use_schedule_free
+        self.use_cautious = use_cautious
+        if use_cautious:
+            if self.opt_muon is not None: self.opt_muon = _CautiousWrapper(self.opt_muon)
+            self.opt_adamw = _CautiousWrapper(self.opt_adamw)
+            print("🛡️ [CAUTIOUS]: masking updates that disagree with gradient sign (Liang et al. 2024)")
         if use_schedule_free:
             if self.opt_muon is not None:
                 self.opt_muon = _ScheduleFreeWrapper(self.opt_muon, beta=sf_beta, gamma_factor=sf_gamma_factor)
@@ -280,6 +286,35 @@ class _ScheduleFreeWrapper:
         self._state = sd['sf']
         self.beta = sd['beta']
         self.gamma_factor = sd['gamma_factor']
+
+
+class _CautiousWrapper:
+    def __init__(self, base_optimizer):
+        self.base_optimizer = base_optimizer
+
+    @property
+    def param_groups(self):
+        return self.base_optimizer.param_groups
+
+    def zero_grad(self, set_to_none: bool = True):
+        self.base_optimizer.zero_grad(set_to_none=set_to_none)
+
+    @torch.no_grad()
+    def step(self):
+        params = [p for g in self.base_optimizer.param_groups for p in g['params']]
+        snapshots = {p: p.data.clone() for p in params if p.grad is not None}
+        self.base_optimizer.step()
+        for p in params:
+            if p.grad is None: continue
+            update = p.data - snapshots[p]
+            mask = (update * p.grad > 0).to(update.dtype)
+            p.data = snapshots[p] + update * mask
+
+    def state_dict(self):
+        return self.base_optimizer.state_dict()
+
+    def load_state_dict(self, sd):
+        self.base_optimizer.load_state_dict(sd)
 
 
 @register("optimizer", "ema")

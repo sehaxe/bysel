@@ -99,6 +99,7 @@ training/
 - **Muon scale formula:** `0.2 * sqrt(max(A, B))` per Muon paper (Keller Jordan)
 - **NS coefficients:** `(3.4445, -4.7750, 2.0315)` — optimal for 5-step quintic iteration
 - **🆕 v6.0 Schedule-Free wrapping:** `_ScheduleFreeWrapper` (in `optimizer.py`) wraps any `torch.optim.Optimizer` with the SF-SGD algorithm (Defazio et al. 2024). Three internal states per param: x (Polyak average), z (gradient state), y (interpolated forward point in p.data). `step()` swaps p.data=z, calls base.step() to apply ∇f(y) to z, then Polyak-averages z→x and sets p.data=y_{t+1} for the next forward. Wired into `buselOptimizerEngine` via `use_schedule_free=False` (opt-in). For best results set `min_lr_ratio=1.0` in the profile to disable cosine LR decay (cosine interferes with SF's implicit schedule). MLCommons 2024 AlgoPerf self-tuning track winner.
+- **🆕 v6.0 Cautious wrapping:** `_CautiousWrapper` (in `optimizer.py`) wraps any optimizer with sign-aware masking. After `base.step()` computes the update, mask out per-element updates where `update * grad <= 0` (i.e., where the update would go against the gradient direction). Composes with SF (Cautious inside SF — SF swaps p.data, Cautious masks the resulting update). Wired via `use_cautious=False` (opt-in). ~5-10 LoC. Paper: ~1.5× faster convergence.
 - **Auto-Batcher hook:** `train.py` uses `grad_accum_steps` separately; engine is per-step
 - **Spike recovery hardcoded:** 35% LR × 15 steps (no config knob yet)
 - **`inject_noise`:** Gaussian `noise_scale × grad_norm` per param (only if `grad_norm > 1e-5`)
