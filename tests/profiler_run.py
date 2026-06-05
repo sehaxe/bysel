@@ -368,8 +368,6 @@ def main():
                         help="MoE top_k: 1 (default, ~35%% routed-FFN FLOP cut) or 2 for ensemble effect.")
     parser.add_argument("--no-grad-ckpt", action="store_true",
                         help="Disable gradient checkpointing (full activation memory, no recompute).")
-    parser.add_argument("--sparse-6-8", action="store_true",
-                        help="Enable Sparse-BitNet 6:8 (6 of every 8 weights kept, 2 zeroed — sparse inference).")
     parser.add_argument("--selective-backward", action="store_true",
                         help="Enable LCSB selective per-layer backward (only k of n layers backprop per step).")
     parser.add_argument("--backward-ratio", type=float, default=0.5,
@@ -394,7 +392,6 @@ def main():
         f"{f'(rank={args.lotus_rank})' if args.optimizer_type == 'lotus_muon' else ''}"
         f" | top_k={args.top_k}"
         f" | grad_ckpt={'off' if args.no_grad_ckpt else 'on(every=2)'}"
-        f" | sparse_6_8={'on' if args.sparse_6_8 else 'off'}"
         f" | selective_bwd={'on' if args.selective_backward else f'off({args.backward_ratio if not args.selective_backward else 0})'}"
     )
     print(f"🖥️  Device: {device.upper()}  |  Profiler backend: {backend}  |  {flags_summary}")
@@ -414,7 +411,6 @@ def main():
         learning_rate_muon = 0.0004
         learning_rate_adamw = 0.00004
         weight_decay = 0.1
-        sparse_6_8 = args.sparse_6_8
         selective_backward = args.selective_backward
         backward_ratio = args.backward_ratio if args.selective_backward else 1.0
 

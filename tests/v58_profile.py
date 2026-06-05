@@ -1,6 +1,6 @@
 """
-🧪 busel v5.8 PROFILE SUITE — consolidated ablation + scaling + pair-interaction profiler.
-Three modes: shpak-5run / shpak-pairs / scale-3sizes (see --help).
+🧪 busel PROFILE SUITE — v6.0 cumulative + v6.1 dispersion profiler.
+Two modes: shpak-v60 / shpak-disp (see --help).
 """
 import argparse
 import json
@@ -28,8 +28,6 @@ BATCH = 16
 CHUNK_SIZE_FORCED = 4096
 N_WARMUP_5RUN = 2
 N_MEASURE_5RUN = 10
-N_WARMUP_SCALE = 5
-N_MEASURE_SCALE = 30
 BATCH_FALLBACK_FOR_ZUBR = 4
 
 
@@ -39,13 +37,12 @@ def _load_profile(name: str) -> dict:
     return full["profiles"][name]
 
 
-def _build(profile_name, batch_size, sparse_6_8, selective_backward, backward_ratio,
+def _build(profile_name, batch_size, selective_backward, backward_ratio,
             use_schedule_free, use_cautious, use_differential_attention,
             use_dispersion_loss, device):
     cfg_profile = _load_profile(profile_name)
     profile = dict(cfg_profile)
     profile["model"] = dict(profile["model"])
-    profile["model"]["sparse_6_8"] = sparse_6_8
     profile["model"]["selective_backward"] = selective_backward
     profile["model"]["backward_ratio"] = backward_ratio
     profile["model"]["use_differential_attention"] = use_differential_attention
@@ -94,12 +91,12 @@ def _build(profile_name, batch_size, sparse_6_8, selective_backward, backward_ra
 
 
 def _run_one(name, profile_name, batch_size, device, n_warmup, n_measure,
-             sparse_6_8=False, selective_backward=False, backward_ratio=1.0,
+             selective_backward=False, backward_ratio=1.0,
              scale_stats=False, use_schedule_free=False, use_cautious=False,
              use_differential_attention=False, use_dispersion_loss=False):
-    print(f"\n{'=' * 80}\n🔬 RUN: {name}\n   profile={profile_name} batch={batch_size} flags=sparse={sparse_6_8} lcsb={selective_backward}({backward_ratio}) sf={use_schedule_free} cau={use_cautious} diff_attn={use_differential_attention} disp={use_dispersion_loss}\n{'=' * 80}")
+    print(f"\n{'=' * 80}\n🔬 RUN: {name}\n   profile={profile_name} batch={batch_size} flags=lcsb={selective_backward}({backward_ratio}) sf={use_schedule_free} cau={use_cautious} diff_attn={use_differential_attention} disp={use_dispersion_loss}\n{'=' * 80}")
     model, patcher, opt, ap, loss_engine, cfg = _build(
-        profile_name, batch_size, sparse_6_8, selective_backward, backward_ratio, use_schedule_free, use_cautious, use_differential_attention, use_dispersion_loss, device,
+        profile_name, batch_size, selective_backward, backward_ratio, use_schedule_free, use_cautious, use_differential_attention, use_dispersion_loss, device,
     )
     n_params = sum(p.numel() for p in model.parameters())
     print(f"   params: {n_params:,} ({n_params * 2 / 1024**2:.2f} MB FP16)")
@@ -180,7 +177,7 @@ def _run_one(name, profile_name, batch_size, device, n_warmup, n_measure,
             del model, patcher, opt, ap, loss_engine
             torch.cuda.empty_cache()
             return _run_one(name, profile_name, BATCH_FALLBACK_FOR_ZUBR, device, n_warmup, n_measure,
-                            sparse_6_8=sparse_6_8, selective_backward=selective_backward,
+                            selective_backward=selective_backward,
                             backward_ratio=backward_ratio, scale_stats=scale_stats,
                             use_schedule_free=use_schedule_free, use_cautious=use_cautious,
                             use_differential_attention=use_differential_attention,
@@ -216,27 +213,6 @@ def _print_table(title, results):
         print(f"{r['name']:<35} | {r['step_ms']:>10.1f} | {r['peak_mb']:>10.0f} | "
               f"{r['tps']:>8.0f} | {r['final_loss']:>8.3f}{ds}")
     print("=" * 90)
-
-
-def mode_shpak_5run(device):
-    print("🧪 busel SHPAK 5-RUN PROFILER (v5.8 research validation)")
-    print("   Profile: shpak 52.8M params, batch=16 ctx=4096")
-    print(f"   Steps per run: {N_MEASURE_5RUN} ({N_WARMUP_5RUN} warmup + {N_MEASURE_5RUN} measured)\n")
-    runs = [
-        ("1. baseline",                              {}),
-        ("2. + Sparse-BitNet 6:8",                    {"sparse_6_8": True}),
-        ("3. + LCSB ratio=0.5",                      {"selective_backward": True, "backward_ratio": 0.5}),
-        ("4. + Sparse 6:8 + LCSB",                   {"sparse_6_8": True, "selective_backward": True, "backward_ratio": 0.5}),
-    ]
-    results = []
-    for name, flags in runs:
-        try:
-            results.append(_run_one(name, "shpak", BATCH, n_warmup=N_WARMUP_5RUN, n_measure=N_MEASURE_5RUN, **flags, device=device))
-        except Exception as e:
-            print(f"   ❌ FAILED: {type(e).__name__}: {e}")
-            results.append({"name": name, "error": str(e)})
-    _print_table("SHPAK 5-RUN COMPARISON (52.8M, batch=16 ctx=4096, 10 steps)", results)
-    return results
 
 
 def mode_shpak_v60(device):
@@ -286,47 +262,19 @@ def mode_shpak_disp(device):
     return results
 
 
-def mode_scale_3sizes(device):
-    print("🧪 busel 3-SIZE PAIR-INTERACTION PROFILER (v5.8)")
-    print(f"   Uniform workload: batch=16 ctx=4096, {N_MEASURE_SCALE} measured steps each")
-    print(f"   zubr falls back to batch={BATCH_FALLBACK_FOR_ZUBR} on OOM\n")
-    configs = [
-        ("baseline",       {}),
-        ("+Sparse 6:8",    {"sparse_6_8": True}),
-        ("+LCSB",          {"selective_backward": True, "backward_ratio": 0.5}),
-        ("+Sparse+LCSB",   {"sparse_6_8": True, "selective_backward": True, "backward_ratio": 0.5}),
-    ]
-    results = []
-    for profile_name in ("micro_test", "shpak", "zubr"):
-        for cfg_name, flags in configs:
-            name = f"{profile_name} | {cfg_name}"
-            try:
-                results.append(_run_one(name, profile_name, BATCH, n_warmup=N_WARMUP_SCALE,
-                                        n_measure=N_MEASURE_SCALE, scale_stats=True, **flags, device=device))
-            except Exception as e:
-                print(f"   ❌ FAILED: {type(e).__name__}: {e}")
-                results.append({"name": name, "error": str(e)})
-    _print_table(f"3-SIZE COMPARISON (micro_test/shpak/zubr, batch=16 ctx=4096, {N_MEASURE_SCALE} steps)", results)
-    return results
-
-
 def main():
-    parser = argparse.ArgumentParser(description="busel v5.8 profile suite")
-    parser.add_argument("--mode", choices=["shpak-5run", "shpak-v60", "shpak-disp", "scale-3sizes"],
-                        default="shpak-5run", help="Which comparison to run (default: shpak-5run)")
+    parser = argparse.ArgumentParser(description="busel v6.x profile suite (v6.0 cumulative + v6.1 dispersion)")
+    parser.add_argument("--mode", choices=["shpak-v60", "shpak-disp"],
+                        default="shpak-v60", help="Which comparison to run (default: shpak-v60)")
     parser.add_argument("--out", default="checkpoints/v58_profile.json",
                         help="Output JSON path (default: checkpoints/v58_profile.json)")
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
-    if args.mode == "shpak-5run":
-        results = mode_shpak_5run(device)
-    elif args.mode == "shpak-v60":
+    if args.mode == "shpak-v60":
         results = mode_shpak_v60(device)
-    elif args.mode == "shpak-disp":
-        results = mode_shpak_disp(device)
     else:
-        results = mode_scale_3sizes(device)
+        results = mode_shpak_disp(device)
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
