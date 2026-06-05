@@ -24,7 +24,7 @@ from model.layers import BitLinear_a4_8, H_BitLinear, RMSNorm, SwishGLUClamped, 
 from model.attention import stable_gdn2_recurrent_jit, BulbaGDN2SeRoPEBlock, MultiHeadLatentAttention
 from model.routing import MoDSequenceRouter, BulbaTernaryTitanExpertFFN, BulbaTernaryTitanMoE
 from model.backbone import buselModel, ManifoldConstrainedAttnRes
-from training.optimizer import _compiled_newton_schulz, buselOptimizerEngine, Muon, _newton_schulz_core
+from training.optimizer import _compiled_newton_schulz, buselOptimizerEngine, Muon, _newton_schulz_core, _ScheduleFreeWrapper
 from training.recipe import buselLossEngine, validate_training_schedule
 
 from busel_registry import register, get, list_registered, is_registered, unregister, clear_registry
@@ -268,6 +268,32 @@ class TestbuselFramework(unittest.TestCase):
         self.assertEqual(O_t.shape, (512, 256))
         self.assertFalse(torch.isnan(O_t).any(), "O_t contains NaNs!")
         print("   ✅ Muon Transpose Trick passed.")
+
+    def test_schedule_free_wrapper(self):
+        print("🧪 [SF] Schedule-Free wrapper (Defazio 2024) on Muon path...")
+        torch.manual_seed(42)
+        p = torch.randn(64, 64, device=self.device, requires_grad=True)
+        target = torch.zeros_like(p)
+        base_opt = Muon([p], lr=1e-2, momentum=0.9)
+        sf_opt = _ScheduleFreeWrapper(base_opt, beta=0.9, gamma_factor=2.0)
+
+        for t in range(5):
+            sf_opt.zero_grad()
+            loss = ((p - target) ** 2).sum() * 0.01
+            loss.backward()
+            sf_opt.step()
+            self.assertIn('x', sf_opt._state[p])
+            self.assertIn('z', sf_opt._state[p])
+            self.assertEqual(sf_opt._state[p]['t'], t + 1)
+            self.assertFalse(torch.isnan(p).any(), f"SF produced NaN at step {t+1}")
+
+        final_loss = ((p - target) ** 2).sum().item()
+        self.assertLess(final_loss, 64 * 64, "SF did not reduce the loss")
+        sd = sf_opt.state_dict()
+        self.assertIn('base', sd)
+        self.assertIn('sf', sd)
+        print(f"   ✅ Schedule-Free wrapper: 5 steps OK, t=5, loss@x={final_loss:.2f}")
+
 
     def test_complete_backbone_and_gradients(self):
         print("🧪 [8] Complete Backbone & Backpropagation...")

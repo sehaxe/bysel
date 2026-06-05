@@ -151,7 +151,8 @@ class buselOptimizerEngine:
 
     def __init__(self, model, lr_muon=0.002, lr_adamw=0.0002,
                  optimizer_type="muon", lotus_rank=8, lotus_lr_scale=0.5,
-                 lr_multipliers=None):
+                 lr_multipliers=None, use_schedule_free=False,
+                 sf_beta=0.9, sf_gamma_factor=2.0):
         muon_params = []
         adamw_params = []
         for name, param in model.named_parameters():
@@ -205,6 +206,13 @@ class buselOptimizerEngine:
 
         self.opt_adamw = torch.optim.AdamW(adamw_groups, lr=lr_adamw, weight_decay=0.01)
         self.optimizer_type = optimizer_type
+        self.use_schedule_free = use_schedule_free
+        if use_schedule_free:
+            if self.opt_muon is not None:
+                self.opt_muon = _ScheduleFreeWrapper(self.opt_muon, beta=sf_beta, gamma_factor=sf_gamma_factor)
+                print(f"🌀 [SF-AVG]: Schedule-Free averaging on Muon path (β={sf_beta}, γ×{sf_gamma_factor}) — MLCommons 2024 AlgoPerf winner")
+            self.opt_adamw = _ScheduleFreeWrapper(self.opt_adamw, beta=sf_beta, gamma_factor=sf_gamma_factor)
+            print(f"🌀 [SF-AVG]: Schedule-Free averaging on AdamW path (β={sf_beta}, γ×{sf_gamma_factor})")
 
         n_muon = sum(p.numel() for _, p in muon_params)
         n_adamw = sum(p.numel() for _, p in adamw_params)
@@ -223,6 +231,55 @@ class buselOptimizerEngine:
     def step(self):
         if self.opt_muon is not None: self.opt_muon.step()
         self.opt_adamw.step()
+
+
+class _ScheduleFreeWrapper:
+    def __init__(self, base_optimizer, beta: float = 0.9, gamma_factor: float = 2.0):
+        self.base_optimizer = base_optimizer
+        self.beta = beta
+        self.gamma_factor = gamma_factor
+        self._state: dict = {}
+
+    def zero_grad(self, set_to_none: bool = True):
+        self.base_optimizer.zero_grad(set_to_none=set_to_none)
+
+    @torch.no_grad()
+    def step(self):
+        params = [p for g in self.base_optimizer.param_groups for p in g['params']]
+        for g in self.base_optimizer.param_groups:
+            g['lr'] = g['lr'] * self.gamma_factor
+        for p in params:
+            if p.grad is None:
+                continue
+            state = self._state.get(p)
+            if state is None:
+                self._state[p] = {'x': p.data.clone(), 'z': p.data.clone(), 't': 0}
+            p.data.copy_(self._state[p]['z'])
+        self.base_optimizer.step()
+        for g in self.base_optimizer.param_groups:
+            g['lr'] = g['lr'] / self.gamma_factor
+        for p in params:
+            if p.grad is None:
+                continue
+            state = self._state[p]
+            z_new = p.data.clone()
+            t_new = state['t'] + 1
+            x_new = (1.0 - 1.0 / t_new) * state['x'] + (1.0 / t_new) * z_new
+            y_new = (1.0 - self.beta) * x_new + self.beta * z_new
+            state['z'] = z_new
+            state['x'] = x_new
+            state['t'] = t_new
+            p.data.copy_(y_new)
+
+    def state_dict(self):
+        return {'base': self.base_optimizer.state_dict(), 'sf': self._state,
+                'beta': self.beta, 'gamma_factor': self.gamma_factor}
+
+    def load_state_dict(self, sd):
+        self.base_optimizer.load_state_dict(sd['base'])
+        self._state = sd['sf']
+        self.beta = sd['beta']
+        self.gamma_factor = sd['gamma_factor']
 
 
 @register("optimizer", "ema")
