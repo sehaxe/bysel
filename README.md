@@ -58,18 +58,21 @@ in whether the *scaling-laws ceiling* can be pushed down by:
    smoother loss + lower variance, **selective activation checkpointing**
    (`every=2` — half the layers are recomputed during backward, halving
    activation memory).
-9. **v5.8 opt-in research features** — three new backward-pass optimizations,
-   all off by default, all validated on shpak 52.8M:
-   - **Sparse-BitNet 6:8** (Dual STE) — 2/8 weight sparsity mask. No win on
-     CUDA (no N:M-aware GEMM kernels), CPU/inference win.
-   - **GradLite error feedback** — per-param fp32 error buffers in
-     `buselOptimizerEngine`. Framework for future quantization errors.
-   - **LCSB selective per-layer backward** — 50% of layers run under
-     `no_grad` per forward. **−44% step, −25% peak VRAM, +80% tok/s**
-     on shpak, no convergence regression. The clear winner — flip
-     `selective_backward: true, backward_ratio: 0.5` in your profile
-     after extended validation. See `tests/shpak_profile_5runs.py`
-     for the 5-run comparison.
+ 9. **v6.0 production defaults** (LCSB flipped to default ON, GradLite removed):
+    - **LCSB selective per-layer backward** (default ON in shpak/zubr/chyzh) —
+      50% of layers run under `no_grad` per forward; mAR identity still
+      carries grad. **−44% step, −25% peak VRAM, +80% tok/s** on shpak, no
+      convergence regression. The clear v5.8 winner, flipped to default in
+      v6.0. Off in test/calibration profiles (validation, micro_test,
+      quick_test) for deterministic forward.
+    - **Sparse-BitNet 6:8** (Dual STE) — 2/8 weight sparsity mask via
+      quant-then-mask order (paper §3.3 baseline, fixed in v6.0). Quality
+      benefit on 1.58-bit (paper: BF16 +1.20 PPL vs Sparse-BitNet +0.32 PPL
+      on 0.5B) — busel validation in progress. Off by default; flip
+      `sparse_6_8: true` to test.
+    - **GradLite error feedback** — **REMOVED in v6.0.** LOTUS+bf16 round-trip
+      is numerically exact → no error to feedback → +1 GB VRAM for 0% benefit.
+    - See `tests/v58_profile.py` for the 3-mode profile comparison.
 
 The codebase is intentionally small — the entire model + training + data
 pipeline is ~3,000 lines of Python and ~140 lines of Rust, so you can read
@@ -172,7 +175,7 @@ busel-ai/
 ├── multimodal/         # 🛰️ Any-to-token encoders (image/video/audio/PDF/docx) — cv2 fast path
 ├── ui/                 # Teto Vocaloid emoticon + rich terminal helpers
 ├── tools/              # CLI (typer), data_manager, orchestrator, plotter, inference
-├── tests/              # unittest suite (169 tests) + ultra-stable profiler v2.1 + shpak 5-run profile (v5.8)
+├── tests/              # unittest suite (168 tests) + ultra-stable profiler v2.1 + consolidated 3-mode v58_profile.py (v5.8)
 ├── busel_rust_io/      # PyO3 Rust ext: mmap ByteStreamer, ternary matmul, packer
 ├── configs/            # default.yaml — Shpak / Zubr / Chyzh / micro_test / quick_test
 ├── site/               # Astro+Starlight docs site (this wiki)
@@ -365,15 +368,17 @@ class MyNewAttention(nn.Module):
 It will be discoverable via `get("attention", "my_new_attention")` and
 listed in the registry dump. No central switch statement to edit.
 
-Tests live in [`tests/test_suite.py`](./tests/test_suite.py) (169 tests
-in v5.8, verbose mode by default, no pytest, no torch.profiler on MPS).
+Tests live in [`tests/test_suite.py`](./tests/test_suite.py) (168 tests,
+verbose mode by default, no pytest, no torch.profiler on MPS).
 Add new tests there — never spawn a second test file.
 
-For v5.8 research validation, run
-`uv run python tests/shpak_profile_5runs.py` to compare baseline vs
-Sparse-BitNet 6:8, GradLite, LCSB, and all-combined on shpak 52.8M,
-and `uv run python tests/shpak_profile_pairs.py` to measure
-pair-interaction overhead on top of LCSB alone.
+For v5.8/v6.0 research validation, run
+`uv run python tests/v58_profile.py --mode shpak-5run` to compare baseline vs
+Sparse-BitNet 6:8 and LCSB on shpak 52.8M,
+`uv run python tests/v58_profile.py --mode shpak-pairs` to measure
+pair-interaction overhead on top of LCSB alone, and
+`uv run python tests/v58_profile.py --mode scale-3sizes` to scale the comparison
+across micro_test / shpak / zubr.
 
 The **multimodal** module follows the same pattern: encoders are registered
 via `@register("encoder", name)`. To add a new modality, write a class that

@@ -73,12 +73,13 @@ class BitLinear_a4_8(nn.Linear):
 
     def forward(self, x):
         w = self.weight
-        if self.is_sparse_6_8 and w.numel() % 8 == 0:
-            w = DualMaskSTE.apply(w, _n_m_6_8_mask(w))
+        sparse_mask = _n_m_6_8_mask(w) if (self.is_sparse_6_8 and w.numel() % 8 == 0) else None
         alpha = w.abs().mean().detach() + 1e-5
         w_scaled = w / alpha
         w_clipped = torch.clamp(w_scaled, -1, 1)
         w_quant = w_clipped + (RoundSTE.apply(w_clipped) - w_clipped)
+        if sparse_mask is not None:
+            w_quant = DualMaskSTE.apply(w_quant, sparse_mask)
 
         if not self.is_intermediate:
             beta = x.abs().mean(dim=-1, keepdim=True).detach() + 1e-5

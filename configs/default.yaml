@@ -30,7 +30,6 @@ profiles:
       weight_decay: 0.1
       grad_accum_steps: 1
       checkpoint_interval: 200
-      use_error_feedback: false  # 🆕 GradLite error-feedback correction
 
   micro_test:
     model:
@@ -57,7 +56,6 @@ profiles:
       weight_decay: 0.1
       grad_accum_steps: 1
       checkpoint_interval: 500  # Save every 500 steps
-      use_error_feedback: false
 
   quick_test:
     model:
@@ -83,7 +81,6 @@ profiles:
       learning_rate_adamw: 0.0002
       weight_decay: 0.1
       grad_accum_steps: 1
-      use_error_feedback: false
 
   chyzh:
     model:
@@ -95,8 +92,8 @@ profiles:
       top_k: 1
       vocab_size: 326        # 256 raw bytes + 3 legacy + 67 plug-in specials
       sparse_6_8: false
-      selective_backward: false
-      backward_ratio: 1.0
+      selective_backward: true
+      backward_ratio: 0.5
     data:
       data_path: "data_train"
       chunk_size: 512      # Рабочий контекст 2К
@@ -109,7 +106,6 @@ profiles:
       learning_rate_adamw: 0.00008
       weight_decay: 0.1
       grad_accum_steps: 1   # Накопление не требуется, батч 512 пройдет легко
-      use_error_feedback: false
 
   shpak:
     model:
@@ -121,8 +117,8 @@ profiles:
       top_k: 1
       vocab_size: 326        # 256 raw bytes + 3 legacy + 67 plug-in specials
       sparse_6_8: false
-      selective_backward: false
-      backward_ratio: 1.0
+      selective_backward: true
+      backward_ratio: 0.5
     data:
       data_path: "data_train"
       chunk_size: 4096
@@ -135,7 +131,6 @@ profiles:
       learning_rate_adamw: 0.00006
       weight_decay: 0.1
       grad_accum_steps: 1   # Auto-Batcher адаптирует батч сам
-      use_error_feedback: false
 
   zubr:
     model:
@@ -148,8 +143,8 @@ profiles:
       vocab_size: 326        # 256 raw bytes + 3 legacy + 67 plug-in specials
       n_hyper: 4
       sparse_6_8: false
-      selective_backward: false
-      backward_ratio: 1.0
+      selective_backward: true
+      backward_ratio: 0.5
     data:
       data_path: "data_train"
       chunk_size: 16384
@@ -162,4 +157,3 @@ profiles:
       learning_rate_adamw: 0.00006
       weight_decay: 0.1
       grad_accum_steps: 1   # Auto-Batcher адаптирует батч сам
-      use_error_feedback: false

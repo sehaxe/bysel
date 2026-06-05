@@ -189,40 +189,6 @@ This cached `_muon_scale` is used in the update step. After calibration, the per
 | Embeddings don't move | `is_muon_param` accidentally true | Add `"embed" in name` check |
 | NaN after warmup | Muon momentum too high | Drop to 0.9 |
 
-## GradLite error feedback (v5.8, opt-in)
-
-A safety-net framework for future quantization errors. When
-`use_error_feedback: true` is set, `buselOptimizerEngine` keeps a
-per-parameter error buffer `_error_buffers[name] = torch.zeros_like(p)`
-in fp32. On every `step()`:
-
-```python
-p.grad.data.add_(buf.to(p.grad.dtype))      # inject previous "leftover" gradient
-self._error_buffers[name] = (-buf).detach()  # flip sign for next step
-```
-
-Mathematically this is a no-op when the optimizer step is exact
-(`g' = g + buf; buf = -buf` means `g' = g - (-buf) = g + buf`, but the
-next call again does `g'' = g' - buf = g - (-buf) - (-buf) = g + buf`).
-**The framework absorbs the residuals** that show up when LOTUS rank-r
-approximation, bf16 precision loss, or sparse-mask gradient correction
-start producing small systematic errors.
-
-**Validation on shpak 52.8M (batch=16, ctx=4096):** +0.08 % step time,
-+219 MB peak VRAM (≈ 4 % overhead from the buffer copies), no
-convergence change. **Framework-only benefit at present** — keep OFF
-until a downstream step needs the buffer. To enable:
-
-```yaml
-# configs/default.yaml — shpak profile
-training:
-  use_error_feedback: true
-```
-
-The framework is a `buselOptimizerEngine` flag, not a separate
-optimizer class — it composes cleanly with LOTUS+Muon, EMA, and
-decoupled per-layer LR. **🆕 v5.8**
-
 ## Where to look in the code
 
 | Component | File | Notes |

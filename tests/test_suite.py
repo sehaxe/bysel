@@ -206,32 +206,8 @@ class TestbuselFramework(unittest.TestCase):
         self.assertFalse(lin_dense.is_sparse_6_8)
         print("   ✅ Sparse-BitNet 6:8 forward+backward passed.")
 
-    def test_gradlite_error_feedback(self):
-        print("🧪 [4c] GradLite error-feedback correction (buselOptimizerEngine)...")
-        torch.manual_seed(0)
-        cfg = _MockConfig(d_model=32, n_layers=2, n_heads=2, num_experts=2)
-        model = buselModel(cfg).to(self.device)
-        opt = buselOptimizerEngine(
-            model, lr_muon=1e-3, lr_adamw=1e-4,
-            optimizer_type="muon", use_error_feedback=True,
-        )
-        self.assertTrue(opt.use_error_feedback)
-        self.assertIsNotNone(opt._error_buffers)
-        self.assertGreater(len(opt._error_buffers), 0)
-        x = torch.randn(2, 8, 32, device=self.device)
-        out, _ = model(x, None)
-        loss = out[0].sum()
-        loss.backward()
-        for buf in opt._error_buffers.values():
-            self.assertFalse(torch.isnan(buf).any())
-        opt.step()
-        for buf in opt._error_buffers.values():
-            self.assertFalse(torch.isnan(buf).any())
-        opt.zero_grad()
-        print("   ✅ GradLite error-feedback: buffer init, step, zero_grad all clean.")
-
     def test_lcsb_selective_backward(self):
-        print("🧪 [4d] LCSB selective per-layer backward (buselModel)...")
+        print("🧪 [4c] LCSB selective per-layer backward (buselModel)...")
         torch.manual_seed(0)
         cfg = _MockConfig(d_model=32, n_layers=6, n_heads=2, num_experts=2)
         cfg.selective_backward = True

@@ -1,6 +1,6 @@
 # training/ — Optimizer, AutoPilot, Loss, **Stage Framework**
 
-**Scope:** Hybrid Muon+AdamW, predictive AutoPilot v6.0, MTP-4 weighted loss engine, **v5.5 multi-stage pipeline framework**, **v5.6 SFT/DPO/eval stages**, **v5.7.1 compile-safe checkpoint loader**, **v5.7.1 LOTUS+Muon (rank-8) + EMA + decoupled per-layer LR + selective activation checkpointing (all on by default)**, **v5.8 GradLite error feedback (opt-in, OFF by default)**.
+**Scope:** Hybrid Muon+AdamW, predictive AutoPilot v6.0, MTP-4 weighted loss engine, **v5.5 multi-stage pipeline framework**, **v5.6 SFT/DPO/eval stages**, **v5.7.1 compile-safe checkpoint loader**, **v5.7.1 LOTUS+Muon (rank-8) + EMA + decoupled per-layer LR + selective activation checkpointing (all on by default)**, **v5.8 LCSB selective per-layer backward (opt-in, OFF by default)**.
 
 ## STRUCTURE
 ```
@@ -38,7 +38,7 @@ training/
 | `Muon` | Optimizer | optimizer.py | Manual momentum + NS orthogonalize, scale=`0.2*sqrt(max(A,B))`. NS initial normalisation divides by Frobenius norm (deliberately over-normalising: `‖X‖₂ ≤ ‖X‖_F`, so `X/‖X‖_F` guarantees spectral norm ≤ 1 with strict margin). Spectral norm (`X/‖X‖₂`) is theoretically tighter but lands exactly on the NS convergence boundary and is sensitive to FP error — see `_newton_schulz_core` docstring for the divergence note. |
 | `LotusMuon` | Optimizer | optimizer.py | **v5.7.1+ default.** Rank-`lotus_rank` factorised Muon momentum. Reconstructs `m ≈ buf_p @ buf_q.T` on the fly before NS. **~85× less optimizer state** than full Muon at rank=8. |
 | `EMAState` | class | optimizer.py | **v5.7.1+ default (`use_ema=True`, `ema_decay=0.999`).** EMA shadow of weights, updated every step. Saved alongside model state in checkpoints. Smooths loss + gives 10-15 % fewer steps to same loss. |
-| `buselOptimizerEngine` | class | optimizer.py | Splits params: 2D+!`router`+!`embed`→Muon; rest→AdamW. **6 sub-groups** (`attn`, `ffn`, `mtp`, `norm`, `embed`, `router`) for **decoupled per-layer LR multipliers**. Prints routing summary. **🆕 v5.8** — `use_error_feedback=True` enables **GradLite per-param error buffers** (safety net for future quantization errors). |
+| `buselOptimizerEngine` | class | optimizer.py | Splits params: 2D+!`router`+!`embed`→Muon; rest→AdamW. **6 sub-groups** (`attn`, `ffn`, `mtp`, `norm`, `embed`, `router`) for **decoupled per-layer LR multipliers**. Prints routing summary. |
 | `buselAutoPilot` | class | autopilot.py | Wraps engine; tracks loss/grad history; recovery countdown; **re-pushes per-subgroup LR multipliers every step** |
 | `buselLossEngine` | class | recipe.py | Liger-CE on CUDA; vanilla `F.cross_entropy` elsewhere. MTP weights `[0.5, 0.25, 0.125]` (T1 has implicit 1.0). `__init__(vocab_size=259)` is the dataclass default — the config overrides to 326. |
 | `validate_training_schedule` | function | recipe.py | Runtime guard for `max_steps > warmup_steps` and `warmup >= 1`; called from `train.py` after auto-planning |
@@ -94,7 +94,6 @@ training/
 - **NEVER** import `train.py` from `stages/` — `buselPretrainStage` is the new canonical interface; the legacy `train.py` stays untouched for backward compat
 - **NEVER** register a stage in a runtime-loaded module without re-triggering `__init__.py` — the registry is populated only at import time
 - **NEVER** swallow `KeyError` from `get_stage()` in production — orchestrator treats it as a hard config error
-- **NEVER** enable `use_error_feedback=True` without profiling first — GradLite buffers are full-sized per param and add ~2× model-size in extra VRAM. The framework is a safety net for when LOTUS rank-r errors or bf16 precision loss show up; on shpak 52.8M with bf16 + LOTUS rank=8 the round-trip is currently numerically a no-op. **🆕 v5.8**
 
 ## NOTES
 - **Muon scale formula:** `0.2 * sqrt(max(A, B))` per Muon paper (Keller Jordan)
@@ -117,5 +116,4 @@ training/
 - **Stage framework phases:** Phase 0+1 (this release) = pretrain stage only. Phase 2-8 will add SFT, DPO, eval, REPL stages.
 - **v5.7.1 checkpoint loading:** All 4 stages (`pretrain`, `sft`, `dpo`, `eval`) load checkpoints via `model.checkpoint.load_state_dict_safely(model, ckpt["model_state_dict"])` instead of `model.load_state_dict(...)`. This is **required** — `train.py` runs with `--compile` by default, so saved checkpoints have `_orig_mod.` prefixes and reach the stages wrapped in `OptimizedModule`. See `model/AGENTS.md` for the full helper API and the 4 cross-config cases.
 - **Registry kind `stage`:** The stages use `busel_registry.register("stage", name)` (a new registry kind). `get_stage("pretrain")` returns the class. The existing `attention`/`optimizer`/`encoder` kinds are untouched.
-- **GradLite error feedback (v5.8):** Per-param `_error_buffers` (one fp32 copy of every trainable param) — `step()` flow is `g' = g + buf; buf = -buf`. Mathematically a no-op when the optimizer step is exact, but provides the framework to absorb future quantization errors (LOTUS rank-r approximation, bf16 precision loss, sparse-mask gradient correction). **Validation on shpak 52.8M (batch=16, ctx=4096):** +0.08% step time, +219 MB peak VRAM (≈4% overhead from buffer copies), no convergence change. **Framework-only benefit at present** — keep OFF until a downstream step needs the buffer. To enable: set `use_error_feedback: true` in the YAML's `training:` block. **🆕 v5.8**
-- **v5.8 wiring to `buselPretrainConfig`:** Four new fields — `sparse_6_8`, `selective_backward`, `backward_ratio`, `use_error_feedback`. All default OFF. The `from_profile` reader maps them to the right places: `sparse_6_8` walks all `BitLinear_a4_8` submodules in `buselModel.__init__`; `selective_backward` + `backward_ratio` enable LCSB; `use_error_feedback` plumbs into `buselOptimizerEngine`. **🆕 v5.8**
+- **v5.8 wiring to `buselPretrainConfig`:** Three new fields — `sparse_6_8`, `selective_backward`, `backward_ratio`. All default OFF. The `from_profile` reader maps them to the right places: `sparse_6_8` walks all `BitLinear_a4_8` submodules in `buselModel.__init__`; `selective_backward` + `backward_ratio` enable LCSB. **🆕 v5.8**

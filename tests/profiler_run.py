@@ -370,8 +370,6 @@ def main():
                         help="Disable gradient checkpointing (full activation memory, no recompute).")
     parser.add_argument("--sparse-6-8", action="store_true",
                         help="Enable Sparse-BitNet 6:8 (6 of every 8 weights kept, 2 zeroed — sparse inference).")
-    parser.add_argument("--use-error-feedback", action="store_true",
-                        help="Enable GradLite error-feedback correction in buselOptimizerEngine.")
     parser.add_argument("--selective-backward", action="store_true",
                         help="Enable LCSB selective per-layer backward (only k of n layers backprop per step).")
     parser.add_argument("--backward-ratio", type=float, default=0.5,
@@ -397,7 +395,6 @@ def main():
         f" | top_k={args.top_k}"
         f" | grad_ckpt={'off' if args.no_grad_ckpt else 'on(every=2)'}"
         f" | sparse_6_8={'on' if args.sparse_6_8 else 'off'}"
-        f" | error_feedback={'on' if args.use_error_feedback else 'off'}"
         f" | selective_bwd={'on' if args.selective_backward else f'off({args.backward_ratio if not args.selective_backward else 0})'}"
     )
     print(f"🖥️  Device: {device.upper()}  |  Profiler backend: {backend}  |  {flags_summary}")
@@ -455,7 +452,6 @@ def main():
         optimizer_type=args.optimizer_type,
         lotus_rank=args.lotus_rank,
         lotus_lr_scale=args.lotus_lr_scale,
-        use_error_feedback=args.use_error_feedback,
     )
     loss_engine = buselLossEngine(cfg.vocab_size)
     autopilot = buselAutoPilot(

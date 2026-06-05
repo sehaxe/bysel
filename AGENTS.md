@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-06-05
 **Branch:** main
-**Test count:** 169 (unittest, no pytest)
+**Test count:** 168 (unittest, no pytest)
 
 ## [PRIORITY] — read first
 1. **Performance + LOC** — when in doubt, the faster + shorter option wins.
@@ -13,7 +13,7 @@
 ## OVERVIEW
 **busel v5.8+** — Sovereign 1-bit (1.58b) Any-to-Text LLM. Hybrid Python + Rust (PyO3 via maturin). Targets consumer HW (RTX 5060 Ti 16 GB / Apple Silicon). Trained via CLI, documented in `site/` (Astro+Starlight, Bun).
 
-**Architecture:** 1.58-bit ternary weights · byte-level vocab=326 · `stride=4` patching · 3:1 GDN-2:MLA attention · mAR residuals (Sinkhorn-Knopp on Birkhoff polytope) · **Top-1 MoE** with Blackboard Memory · MTP-4 heads · **LOTUS+Muon** (rank-8 factorised) + AdamW hybrid · **EMA of weights** · **selective activation checkpointing** (every=2) · **decoupled per-layer LR** (6 sub-groups) · **multi-stage pipeline** (pretrain → SFT → DPO → eval, v5.5) · **REPL tool executor** (v5.7) · **compile-safe checkpoint loader** (v5.7.1) · **opt-in v5.8 research features**: Sparse-BitNet 6:8 (Dual STE), GradLite error feedback, LCSB selective per-layer backward.
+**Architecture:** 1.58-bit ternary weights · byte-level vocab=326 · `stride=4` patching · 3:1 GDN-2:MLA attention · mAR residuals (Sinkhorn-Knopp on Birkhoff polytope) · **Top-1 MoE** with Blackboard Memory · MTP-4 heads · **LOTUS+Muon** (rank-8 factorised) + AdamW hybrid · **EMA of weights** · **selective activation checkpointing** (every=2) · **LCSB selective per-layer backward** (default ON in shpak/zubr/chyzh, v6.0) · **decoupled per-layer LR** (6 sub-groups) · **multi-stage pipeline** (pretrain → SFT → DPO → eval, v5.5) · **REPL tool executor** (v5.7) · **compile-safe checkpoint loader** (v5.7.1) · **opt-in v5.8 research feature**: Sparse-BitNet 6:8 (Dual STE, paper §3.3 quant-then-mask order).
 
 ## STRUCTURE
 ```
@@ -24,7 +24,7 @@ busel-ai/
 ├── multimodal/        # Any-to-token encoders (image/video/audio/PDF/docx) + 70-token special vocab
 ├── ui/                # Teto Vocaloid emoticon + rich terminal helpers
 ├── tools/             # Typer CLI (orchestrator, data_manager, plotter, inference, **tool_executor** v5.7)
-├── tests/             # unittest suite (169) + ultra-stable profiler v2.1 + shpak 5-run + shpak pair-interaction (v5.8)
+├── tests/             # unittest suite (168) + ultra-stable profiler v2.1 + consolidated 3-mode v58_profile.py (v5.8)
 ├── busel_rust_io/     # PyO3 Rust ext: mmap ByteStreamer, ternary matmul, binary packer
 ├── configs/           # default.yaml — Shpak/Zubr/Chyzh/MicroTest/QuickTest/Validation profiles
 ├── site/              # Astro+Starlight docs (GitHub Pages)
@@ -50,23 +50,19 @@ All flipped on by default. No opt-out. The whole arch is better for it.
 | `lotus_lr_scale` | `0.5` | — | LOTUS effective LR = `lr × lotus_lr_scale` |
 | `lr_multipliers` | `{attn:1.0, ffn:1.0, mtp:1.0, norm:1.0, embed:0.5, router:0.5}` | `None` (single LR) | Decoupled per-layer LR — embed/router are noise-sensitive in 1-bit |
 | `grad_ckpt_every` | `2` | `0` (off) | Selective activation checkpointing — **halves activation memory** at <5 % step-time cost |
+| `selective_backward` (LCSB, 🆕 v6.0) | `True` (shpak/zubr/chyzh) | `False` | 50% of layers run under `no_grad` per forward; mAR identity still carries grad. **−44% step, −25% mem, +80% tok/s, 0 quality cost** on shpak. Off in test/calibration profiles (validation, micro_test, quick_test) for deterministic forward. |
+| `backward_ratio` (LCSB, 🆕 v6.0) | `0.5` (LCSB on) | `1.0` | Used with `selective_backward=True`. Range: 0.3-0.7. |
 
-## v5.8 OPT-IN RESEARCH FEATURES (defaults OFF — profile before flipping)
+## v6.0 OPT-IN RESEARCH FEATURES (defaults OFF — profile before flipping)
 | Field | Default | Why OFF by default | Measured on shpak 52.8M |
 |---|---|---|---|
-| `sparse_6_8` (model) | `False` | Sparse-BitNet 6:8 (Dual STE) — 2/8 weight sparsity. No N:M-aware CUDA kernels, so no speedup on training. CPU/inference wins. | +1% step, +2% mem (no win on CUDA) |
-| `use_error_feedback` (training) | `False` | GradLite per-param error buffers — safety net for future quantization errors. Currently a no-op (LOTUS+bf16 round-trip is exact). | +0.08% step, +219 MB (4% mem overhead) |
-| `selective_backward` (model) | `False` | LCSB ratio=0.5: 50% of layers run under `no_grad` per forward. mAR residual identity still carries grad. | **−44% step, −25% mem, +80% tok/s, 0 quality cost** |
-| `backward_ratio` (model) | `1.0` | Used when `selective_backward=True`. Practical range: 0.3-0.7. | n/a |
+| `sparse_6_8` (model) | `False` | Sparse-BitNet 6:8 (Dual STE, paper §3.3 quant-then-mask order, fixed in v6.0) — 2/8 weight sparsity. No N:M-aware CUDA kernels, so no speedup on training. CPU/inference wins. | +1% step, +2% mem (no win on CUDA) |
 
-### v5.8 pair-interaction overhead (added on top of LCSB alone, shpak 52.8M)
-| Pair | Step overhead | Memory overhead | Verdict |
-|---|---:|---:|---|
-| LCSB + Sparse 6:8 | +6.4% | +273 MB | Don't add Sparse to LCSB on CUDA — mask computation overhead. |
-| LCSB + GradLite | +3.8% | **+1016 MB** | Don't add GradLite to LCSB — +1 GB VRAM for marginal speedup. |
-| LCSB + Sparse + GradLite | +6.0% | +1077 MB | Roughly additive. Worst combo. |
+**Removed in v6.0:**
+- **GradLite error feedback** (`use_error_feedback`) — LOTUS+bf16 round-trip is numerically exact → no error to feedback → framework is a no-op. **+1 GB VRAM overhead for 0% benefit.** All code, tests, and config lines deleted.
 
-**Recommendation:** flip LCSB to default ON; keep `sparse_6_8` and `use_error_feedback` OFF. Validate with `tests/shpak_profile_pairs.py`.
+**Flipped to default ON in v6.0:**
+- **LCSB selective per-layer backward** (`selective_backward=True, backward_ratio=0.5`) — validated at all 3 sizes (−57.7% step at 2M, −44.4% at 52.8M, −39.1% at 120M; 0 quality regression at 10 steps). Don't disable without measuring.
 
 All 6 profiles in `configs/default.yaml` (validation, micro_test, quick_test, chyzh, shpak, zubr) inherit these defaults. The CLI `tests/profiler_run.py` defaults are aligned.
 
@@ -89,7 +85,7 @@ All 6 profiles in `configs/default.yaml` (validation, micro_test, quick_test, ch
 
 ## DO
 - **Use the registry** for any plug-in point (attention, optimizer, encoder, autopilot, curriculum, loss, stage). `@register("kind", "name")` — no central switch statements.
-- **Run 169 tests before pushing:** `uv run python -m unittest tests.test_suite` — all must pass.
+- **Run 168 tests before pushing:** `uv run python -m unittest tests.test_suite` — all must pass.
 - **Update README.md AND site/ docs** when a feature changes. The two-track rule: code change → README change → site/ change. Site/ is the human-friendly tour, README is the elevator pitch.
 - **Match existing patterns.** Sample 2-3 similar files before adding a new one. Busel is small — patterns are visible at a glance.
 - **Profile with `tests/profiler_run.py`** before claiming a speedup. Numbers, not vibes.
@@ -104,7 +100,7 @@ All 6 profiles in `configs/default.yaml` (validation, micro_test, quick_test, ch
 - **BPE / tokenizers** — model is byte-level, vocab=326 (256 raw bytes + 70 plug-in specials). See [multimodal/AGENTS.md](file:///home/sehaxe/busel-ai/multimodal/AGENTS.md) for the 70-token breakdown.
 - **Raw `nn.Linear` in model** — must use `BitLinear_a4_8` or `H_BitLinear`. Breaks the 1.58-bit guarantee.
 - **`H_BitLinear` for non-`o_proj`** — BitNet v2 spec mandates it for output projection only (massive-activation mitigation).
-- **Disable any default in [DEFAULTS](#defaults-buselpretrainconfig--single-source-of-truth) without measuring** — LOTUS+Muon, EMA, Top-1, decoupled LR, selective ckpt all help. Re-enabling them is the right move, not disabling.
+- **Disable any default in [DEFAULTS](#defaults-buselpretrainconfig--single-source-of-truth) without measuring** — LOTUS+Muon, EMA, Top-1, decoupled LR, selective ckpt, LCSB all help. Re-enabling them is the right move, not disabling.
 - **`torch.profiler` on macOS** — known to hang; use `tests/profiler_run.py` (`time.perf_counter` + `cuda.max_memory_allocated`).
 - **`model.load_state_dict(sd)` directly** — always `load_state_dict_safely(model, sd)`. Direct loads fail when saved with `--compile` (the default). The helper strips `_orig_mod.` and unwraps `OptimizedModule`.
 - **Drop the `File` handle in `ByteStreamer`** — macOS mmap segfaults without it. Comment in `busel_rust_io/lib.rs:13` explains.
@@ -129,8 +125,7 @@ All 6 profiles in `configs/default.yaml` (validation, micro_test, quick_test, ch
 - **Commit `data_train/`, `checkpoints/`, `.env`, `Cargo.lock`, `target/`** — all gitignored. The `.gitignore` is the single source of truth for what to never commit; do not duplicate that list in a NEVER rule.
 - **Commit without explicit user request** — always wait for `commit` / `push` / `merge` instruction.
 - **Enable `sparse_6_8` on layers with weight `numel() % 8 != 0`** — the `% 8` guard silently no-ops. Check shape before flipping.
-- **Use `sparse_6_8=True` AND `backward_ratio=0.5` together expecting multiplicative speedup** — shpak 52.8M shows Sparse+GradLite overhead partially cancels LCSB's win. Use LCSB alone. **🆕 v5.8**
-- **Enable `use_error_feedback=True` without profiling first** — adds ~2× model-size in extra VRAM. The framework is a safety net for future quantization errors; on shpak 52.8M with bf16 + LOTUS rank=8 the round-trip is currently numerically a no-op. **🆕 v5.8**
+- **Use `sparse_6_8=True` AND `backward_ratio=0.5` together expecting multiplicative speedup** — shpak 52.8M shows Sparse mask overhead (+6% step) partially cancels LCSB's win. Use LCSB alone. **🆕 v5.8, updated v6.0**
 
 ## UNIQUE STYLES
 - **Emoji-prefixed module headers:** every Python file starts with `"""🦩 / ⚙️ / 💡 / 📚 / 🤖 / 🎯 / 🛸 ..."""` docstring.
@@ -160,9 +155,10 @@ uv run python cli.py profile                      # hardware profiler only
 # Docs
 cd site && bun install && bun run build           # GitHub Pages deploy
 
-# Profile v5.8 research features (5 runs on shpak 52.8M)
-uv run python tests/shpak_profile_5runs.py       # baseline / +Sparse / +GradLite / +LCSB / +all
-uv run python tests/shpak_profile_pairs.py       # baseline / +LCSB / +Sparse+LCSB / +GradLite+LCSB / +all
+# Profile v5.8 research features (3 modes on shpak 52.8M + 3-size scaling)
+uv run python tests/v58_profile.py --mode shpak-5run   # 4 configs on shpak (baseline / +Sparse / +LCSB / +Sparse+LCSB)
+uv run python tests/v58_profile.py --mode shpak-pairs  # pair interactions (baseline / +LCSB / +Sparse+LCSB)
+uv run python tests/v58_profile.py --mode scale-3sizes # 4 configs × 3 sizes (micro_test / shpak / zubr)
 ```
 
 ## PER-MODULE RULES
@@ -173,7 +169,7 @@ This file is the project-level summary. Module-specific rules, anti-patterns, an
 - [data/AGENTS.md](file:///home/sehaxe/busel-ai/data/AGENTS.md) — Rust mmap streamer, Python fallback, multimodal dispatch
 - [multimodal/AGENTS.md](file:///home/sehaxe/busel-ai/multimodal/AGENTS.md) — 70-token vocab, 6 encoders (image/video/audio/PDF/docx/text)
 - [tools/AGENTS.md](file:///home/sehaxe/busel-ai/tools/AGENTS.md) — Typer CLI, pipeline orchestrator, **REPL tool executor** (v5.7)
-- [tests/AGENTS.md](file:///home/sehaxe/busel-ai/tests/AGENTS.md) — 169-test unittest suite, custom profiler, **shpak 5-run + shpak pair-interaction** (v5.8)
+- [tests/AGENTS.md](file:///home/sehaxe/busel-ai/tests/AGENTS.md) — 168-test unittest suite, custom profiler, **consolidated 3-mode v58_profile.py** (v5.8)
 - [busel_rust_io/AGENTS.md](file:///home/sehaxe/busel-ai/busel_rust_io/AGENTS.md) — PyO3 extension, mmap safety, Rayon threading
 - [site/AGENTS.md](file:///home/sehaxe/busel-ai/site/AGENTS.md) — Astro+Starlight, build commands, URL structure
 

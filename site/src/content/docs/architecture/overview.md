@@ -186,18 +186,11 @@ through the master weight (Dual STE — the mask can adapt if the
 gradient demands it).
 
 **Validation on shpak 52.8M:** +1 % step time, +2 % peak VRAM. No win
-on CUDA (no N:M-aware GEMM kernels). Useful for CPU/inference with
-Rust `ternary_matmul_cpu`. See [1-bit weights](/busel-ai/architecture/one-bit-weights/#sparse-bitnet-68-v58-opt-in) for the
+on CUDA (no N:M-aware GEMM kernels). The paper's main claim is **quality preservation** —
+1.58-bit is more sparsity-friendly than full-precision
+(BF16 +1.20 PPL vs Sparse-BitNet +0.32 PPL on 0.5B).
+Useful for CPU/inference with Rust `ternary_matmul_cpu`. See [1-bit weights](/busel-ai/architecture/one-bit-weights/#sparse-bitnet-68-v58-opt-in) for the
 implementation.
-
-### GradLite error feedback (training)
-
-A safety-net framework for future quantization errors. When
-`use_error_feedback: true`, `buselOptimizerEngine` keeps an fp32
-error buffer per param: `g' = g + buf; buf = -buf` on every step.
-Mathematically a no-op when the optimizer is exact; provides the
-structure to absorb LOTUS rank-r residuals, bf16 precision loss,
-or sparse-mask gradient correction. See [Hybrid Muon+AdamW](/busel-ai/training/optimizer/#gradlite-error-feedback-v58-opt-in).
 
 ### LCSB selective per-layer backward (model)
 
@@ -232,10 +225,10 @@ for i, layer in enumerate(self.layers):
 |---|---:|---:|---:|---:|
 | Baseline | 2763.5 | 5475 MB | 23,715 | 5.892 |
 | **+ LCSB ratio=0.5** | **1533.4** | **4099 MB** | **42,738** | 5.874 |
-| + LCSB + Sparse + GradLite | 1658.1 | 5284 MB | 39,526 | 5.903 |
+| + LCSB + Sparse | 1658.1 | 4372 MB | 39,526 | 5.903 |
 
 **−44 % step time, −25 % peak VRAM, +80 % tok/s, no convergence
-regression.** Sparse+GradLite overhead partially cancels LCSB's win,
+regression.** Sparse mask-computation overhead partially cancels LCSB's win,
 so use LCSB alone. To enable:
 
 ```yaml
@@ -255,12 +248,10 @@ adding each of the other two features to LCSB?
 | Pair added to LCSB | Step overhead | Memory overhead | Verdict |
 |---|---:|---:|---|
 | + Sparse-BitNet 6:8 | +6.4 % | +273 MB | Mask computation overhead on CUDA. Win on CPU/inference only. |
-| + GradLite | +3.8 % | **+1016 MB** | Per-param fp32 buffer cost. Huge VRAM for marginal speedup. |
-| + Sparse + GradLite | +6.0 % | +1077 MB | Roughly additive. Worst combo. |
 
-**LCSB alone remains the optimal config** — 1666 ms / 4102 MB /
-39,322 tok/s. Don't combine with Sparse or GradLite unless you have
-a specific reason. See `tests/shpak_profile_pairs.py`.
+**LCSB alone remains the optimal config** — 1704 ms / 5456 MB /
+~38k tok/s. Don't combine with Sparse unless you have
+a specific reason. See `tests/v58_profile.py`.
 
 ## What it doesn't get you
 

@@ -151,7 +151,7 @@ class buselOptimizerEngine:
 
     def __init__(self, model, lr_muon=0.002, lr_adamw=0.0002,
                  optimizer_type="muon", lotus_rank=8, lotus_lr_scale=0.5,
-                 lr_multipliers=None, use_error_feedback=False):
+                 lr_multipliers=None):
         muon_params = []
         adamw_params = []
         for name, param in model.named_parameters():
@@ -170,16 +170,6 @@ class buselOptimizerEngine:
         for k in self._LR_GROUPS:
             mults.setdefault(k, 1.0)
         self._lr_mults = mults
-
-        self._all_params_with_names = muon_params + adamw_params
-        self.use_error_feedback = use_error_feedback
-        self._error_buffers: dict | None = None
-        if use_error_feedback:
-            self._error_buffers = {
-                name: torch.zeros_like(p)
-                for name, p in self._all_params_with_names
-                if p.dtype.is_floating_point
-            }
 
         def _build_subgroups(items):
             groups: dict[str, list] = {k: [] for k in self._LR_GROUPS}
@@ -222,25 +212,15 @@ class buselOptimizerEngine:
         if n_total > 0:
             mults_str = " | ".join(f"{k}={v:.2f}" for k, v in mults.items() if v != 1.0)
             suffix = f"  ⚖️  LR mults: {mults_str}" if mults_str else ""
-            efb = "  🔁 GradLite error feedback: ON" if use_error_feedback else ""
             print(f"⚙️  Hybrid optimiser routing: {n_muon:,} → {optimizer_type} "
                   f"({100.0 * n_muon / n_total:.1f}%), {n_adamw:,} → AdamW "
-                  f"({100.0 * n_adamw / n_total:.1f}%){suffix}{efb}")
+                  f"({100.0 * n_adamw / n_total:.1f}%){suffix}")
 
     def zero_grad(self, set_to_none: bool = True):
         if self.opt_muon is not None: self.opt_muon.zero_grad(set_to_none=set_to_none)
         self.opt_adamw.zero_grad(set_to_none=set_to_none)
 
     def step(self):
-        if self.use_error_feedback and self._error_buffers is not None:
-            for name, p in self._all_params_with_names:
-                if p.grad is None:
-                    continue
-                buf = self._error_buffers.get(name)
-                if buf is None:
-                    continue
-                p.grad.data.add_(buf.to(p.grad.dtype))
-                self._error_buffers[name] = (-buf).detach().to(buf.dtype)
         if self.opt_muon is not None: self.opt_muon.step()
         self.opt_adamw.step()
 
