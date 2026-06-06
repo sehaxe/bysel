@@ -417,7 +417,7 @@ class buselPretrainStage:
                 self._compile_in_progress["value"] = False
 
         self.opt_engine = buselOptimizerEngine(
-            self.model,
+            self.model, self.patcher,
             lr_muon=self.cfg.learning_rate_muon,
             lr_adamw=self.cfg.learning_rate_adamw,
             optimizer_type=self.cfg.optimizer_type,

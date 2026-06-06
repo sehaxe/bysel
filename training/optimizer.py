@@ -146,24 +146,25 @@ class buselOptimizerEngine:
         if "moe" in n: return "ffn"
         return "attn"
 
-    def __init__(self, model, lr_muon=0.002, lr_adamw=0.0002,
+    def __init__(self, *modules, lr_muon=0.002, lr_adamw=0.0002,
                  optimizer_type="muon", lotus_rank=8, lotus_lr_scale=0.5,
                  lr_multipliers=None, use_schedule_free=False,
                  sf_beta=0.9, sf_gamma_factor=2.0,
                  use_cautious=False):
         muon_params = []
         adamw_params = []
-        for name, param in model.named_parameters():
-            if not param.requires_grad:
-                continue
-            is_muon_param = (
-                param.ndim == 2
-                and all(token not in name for token in self._MUON_EXCLUDE)
-            )
-            if is_muon_param:
-                muon_params.append((name, param))
-            else:
-                adamw_params.append((name, param))
+        for module in modules:
+            for name, param in module.named_parameters():
+                if not param.requires_grad:
+                    continue
+                is_muon_param = (
+                    param.ndim == 2
+                    and all(token not in name for token in self._MUON_EXCLUDE)
+                )
+                if is_muon_param:
+                    muon_params.append((name, param))
+                else:
+                    adamw_params.append((name, param))
 
         mults = dict(lr_multipliers or {})
         for k in self._LR_GROUPS:
