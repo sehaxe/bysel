@@ -101,16 +101,16 @@ profiles:
       backward_ratio: 0.5
     data:
       data_path: "data_train"
-      chunk_size: 512
-      batch_size: 128
+      chunk_size: 16384
+      batch_size: 32
     training:
-      max_steps: 1500       # Ограничиваем до 1500 шагов вместо "auto"
+      max_steps: "auto"
       warmup_steps: "auto"
       min_lr_ratio: 0.1
-      learning_rate_muon: 0.0008
-      learning_rate_adamw: 0.00008
+      learning_rate_muon: 0.0006
+      learning_rate_adamw: 0.00006
       weight_decay: 0.1
-      grad_accum_steps: 1   # Накопление не требуется, батч 512 пройдет легко
+      grad_accum_steps: 1   # Auto-Batcher адаптирует батч сам
       use_dispersion_loss: false
       dispersion_weight: 0.1
       dispersion_temperature: 2.0
@@ -119,9 +119,7 @@ profiles:
       inductor_cache_clean: false
       inductor_cache_max_gb: 0.0
       keep_last_n: 5
-
-      dynamic_compile: true
-      keep_last_n: 5
+      dynamic_compile: false
 
   shpak:
     model:
@@ -153,7 +151,7 @@ profiles:
       inductor_cache_dir: "~/.cache/busel/inductor"
       inductor_cache_clean: false
       inductor_cache_max_gb: 0.0
-      dynamic_compile: true
+      dynamic_compile: false
       keep_last_n: 5
 
   zubr:
@@ -187,7 +185,7 @@ profiles:
       inductor_cache_dir: "~/.cache/busel/inductor"
       inductor_cache_clean: false
       inductor_cache_max_gb: 0.0
-      dynamic_compile: true
+      dynamic_compile: false
       keep_last_n: 5
 
   shpak:
@@ -206,11 +204,11 @@ profiles:
       chunk_size: 4096
       batch_size: 48
     training:
-      max_steps: "auto"
+      max_steps: 89518
       warmup_steps: "auto"
       min_lr_ratio: 0.1
-      learning_rate_muon: 0.0006
-      learning_rate_adamw: 0.00006
+      learning_rate_muon: 0.0010
+      learning_rate_adamw: 0.0001
       weight_decay: 0.1
       grad_accum_steps: 1   # Auto-Batcher адаптирует батч сам
       use_dispersion_loss: false
@@ -221,6 +219,7 @@ profiles:
       inductor_cache_clean: false
       inductor_cache_max_gb: 0.0
       keep_last_n: 5
+      dynamic_compile: false
 
   zubr:
     model:
@@ -253,3 +252,5 @@ profiles:
       inductor_cache_dir: "~/.cache/busel/inductor"
       inductor_cache_clean: false
       inductor_cache_max_gb: 0.0
+      keep_last_n: 5
+      dynamic_compile: false
