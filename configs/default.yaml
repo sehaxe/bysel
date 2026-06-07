@@ -119,7 +119,7 @@ profiles:
       inductor_cache_clean: false
       inductor_cache_max_gb: 0.0
       keep_last_n: 5
-      dynamic_compile: false
+      dynamic_compile: true
 
   shpak:
     model:
@@ -151,7 +151,7 @@ profiles:
       inductor_cache_dir: "~/.cache/busel/inductor"
       inductor_cache_clean: false
       inductor_cache_max_gb: 0.0
-      dynamic_compile: false
+      dynamic_compile: true
       keep_last_n: 5
 
   zubr:
@@ -185,7 +185,7 @@ profiles:
       inductor_cache_dir: "~/.cache/busel/inductor"
       inductor_cache_clean: false
       inductor_cache_max_gb: 0.0
-      dynamic_compile: false
+      dynamic_compile: true
       keep_last_n: 5
 
   shpak:
@@ -219,7 +219,7 @@ profiles:
       inductor_cache_clean: false
       inductor_cache_max_gb: 0.0
       keep_last_n: 5
-      dynamic_compile: false
+      dynamic_compile: true
 
   zubr:
     model:
@@ -253,4 +253,4 @@ profiles:
       inductor_cache_clean: false
       inductor_cache_max_gb: 0.0
       keep_last_n: 5
-      dynamic_compile: false
+      dynamic_compile: true

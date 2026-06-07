@@ -20,7 +20,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 import yaml
 

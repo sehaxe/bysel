@@ -833,13 +833,8 @@ def _cleanup_old_checkpoints(profile_name: str, keep_last_n: int) -> int:
     files = glob.glob(pattern)
     if len(files) <= keep_last_n:
         return 0
-    step_re = re.compile(r"_step_(\d+)\.pt$")
 
-    def _step_of(path: str) -> int:
-        m = step_re.search(path)
-        return int(m.group(1)) if m else -1
-
-    files.sort(key=_step_of)
+    files.sort(key=lambda p: os.path.getmtime(p))
     to_delete = files[:-keep_last_n] if len(files) > keep_last_n else []
     deleted = 0
     bytes_freed = 0
