@@ -1,9 +1,17 @@
 """
-⚙️ busel LAYERS v4.7 - Autocast Safe, SwishGLU, Fused RMSNorm & H-BitLinear (BitNet v2)
+⚙️ busel LAYERS v4.7 - Autocast Safe, SwishGLU, Fused RMSNorm & H_BitLinear (BitNet v2)
 """
 import torch
 import torch.nn as nn
 import math
+
+_BITLINEAR_CONFIG = {"use_tequila": False, "tequila_lambda": 1e-3, "hestia_temperature": None}
+
+def configure_bitlinear(use_tequila: bool = False, tequila_lambda: float = 1e-3,
+                        hestia_temperature=None):
+    _BITLINEAR_CONFIG["use_tequila"] = use_tequila
+    _BITLINEAR_CONFIG["tequila_lambda"] = tequila_lambda
+    _BITLINEAR_CONFIG["hestia_temperature"] = hestia_temperature
 
 def nvtx_range_push(name: str):
     if torch.cuda.is_available(): torch.cuda.nvtx.range_push(name)
@@ -36,12 +44,55 @@ class RoundSTE(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output): return grad_output
 
+
+class HestiaQuantize(torch.autograd.Function):
+    """Hestia: temperature-controlled softmax relaxation for ternary quantization.
+
+    Instead of hard round (STE), uses softmax expectation over {-1, 0, 1} codebook.
+    Temperature anneals from high (soft) to low (hard) during training.
+    Provides exact gradient fidelity — no deadzone, no gradient mismatch.
+
+    Reference: Wang et al. 2026 (arXiv:2601.20745)
+    """
+    @staticmethod
+    def forward(ctx, x, temperature):
+        ctx.save_for_backward(x, temperature)
+        if temperature.item() < 0.01:
+            return torch.clamp(torch.round(x), -1, 1)
+        codebook = torch.tensor([-1.0, 0.0, 1.0], device=x.device, dtype=x.dtype)
+        logits = -((x.unsqueeze(-1) - codebook) ** 2) / (temperature + 1e-8)
+        probs = torch.softmax(logits, dim=-1)
+        return (probs * codebook).sum(dim=-1)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        x, temperature = ctx.saved_tensors
+        if temperature.item() < 0.01:
+            return grad_output, None
+        codebook = torch.tensor([-1.0, 0.0, 1.0], device=x.device, dtype=x.dtype)
+        logits = -((x.unsqueeze(-1) - codebook) ** 2) / (temperature + 1e-8)
+        probs = torch.softmax(logits, dim=-1)
+        dx = (probs * (codebook.unsqueeze(0) - x.unsqueeze(-1)) * 2 / (temperature + 1e-8)).sum(dim=-1)
+        grad_x = grad_output * dx
+        d_temp = (probs * (codebook.unsqueeze(0) - x.unsqueeze(-1)) ** 2 / (temperature + 1e-8) ** 2).sum(dim=-1)
+        grad_temp = (grad_output * d_temp).sum()
+        return grad_x, grad_temp
+
 class BitLinear_a4_8(nn.Linear):
+    """Ternary linear layer with INT4/INT8 activation quantization.
+
+    v7.0: Tequila deadzone reactivation (Huang et al. 2025, ICLR 2026).
+    v7.0: Hestia temperature-controlled softmax relaxation (Wang et al. 2026).
+    """
     def __init__(self, in_features, out_features, is_intermediate=False,
-                 topk_ratio=0.5):
+                 topk_ratio=0.5, use_tequila=False, tequila_lambda=1e-3,
+                 hestia_temperature=None):
         super().__init__(in_features, out_features, bias=False)
         self.is_intermediate = is_intermediate
         self.topk_ratio = topk_ratio
+        self.use_tequila = use_tequila
+        self.tequila_lambda = tequila_lambda
+        self.hestia_temperature = hestia_temperature
         nn.init.normal_(self.weight, std=0.02)
 
     def forward(self, x):
@@ -49,14 +100,31 @@ class BitLinear_a4_8(nn.Linear):
         alpha = w.abs().mean().detach() + 1e-5
         w_scaled = w / alpha
         w_clipped = torch.clamp(w_scaled, -1, 1)
-        w_quant = w_clipped + (RoundSTE.apply(w_clipped) - w_clipped)
+
+        use_tequila = self.use_tequila or _BITLINEAR_CONFIG["use_tequila"]
+        tequila_lambda = self.tequila_lambda or _BITLINEAR_CONFIG["tequila_lambda"]
+        temp = self.hestia_temperature if self.hestia_temperature is not None else _BITLINEAR_CONFIG["hestia_temperature"]
+
+        if temp is not None and temp.item() > 0 if hasattr(temp, 'item') else temp is not None and temp > 0:
+            temp_val = temp if isinstance(temp, torch.Tensor) else torch.tensor(temp, device=w.device, dtype=w.dtype)
+            w_quant = HestiaQuantize.apply(w_clipped, temp_val)
+        else:
+            w_quant = w_clipped + (RoundSTE.apply(w_clipped) - w_clipped)
+
+        tequila_bias = None
+        if use_tequila and not self.is_intermediate:
+            deadzone_mask = (w_scaled.abs() < 0.5).to(w.dtype)
+            tequila_bias = tequila_lambda * (w * deadzone_mask).sum(dim=-1)
 
         if not self.is_intermediate:
             beta = x.abs().mean(dim=-1, keepdim=True).detach() + 1e-5
             x_scaled = x * (2.6457 / beta)
             x_quant = x_scaled + (RoundSTE.apply(torch.clamp(x_scaled, -8, 7)) - x_scaled)
             out = nn.functional.linear(x_quant, w_quant)
-            return out * (alpha * beta / 2.6457)
+            out = out * (alpha * beta / 2.6457)
+            if tequila_bias is not None:
+                out = out + tequila_bias
+            return out
         else:
             gamma = x.abs().max(dim=-1, keepdim=True)[0].detach() + 1e-5
             x_scaled = x * (127.0 / gamma)

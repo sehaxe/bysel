@@ -1,6 +1,7 @@
 """
-⚙️ busel LOSS ENGINE v4.0 (MTP-4 STABILIZED)
-Вычисляет многоголовый причинный лосс MTP-4 с затухающим взвешиванием.
+⚙️ busel LOSS ENGINE v4.0 (MTP-4 STABILIZED + SALT KD)
+Вычисляет многоголовый причинный лосс MTP-4 с затухающим взвешиванием,
+а также Knowledge Distillation loss для SALT (Small model Aided Large model Training).
 """
 
 import torch
@@ -191,3 +192,49 @@ class buselLossEngine:
         z = F.normalize(e[idx], dim=-1)
         sq_dists = torch.cdist(z, z, p=2).pow(2)
         return weight * torch.log(torch.exp(-temperature * sq_dists).mean() + 1e-8)
+
+    def compute_kd_loss(
+        self,
+        student_logits: torch.Tensor,
+        teacher_logits: torch.Tensor,
+        targets: torch.Tensor,
+        temperature: float = 2.0,
+        alpha: float = 0.5,
+    ) -> torch.Tensor:
+        """Knowledge Distillation loss (Hinton et al. 2015) for SALT.
+        
+        L_KD = α * L_hard(targets) + (1-α) * T² * KL(softmax(z_t/T) || softmax(z_s/T))
+        
+        Args:
+            student_logits: (B, T, V) student model output
+            teacher_logits: (B, T, V) teacher model output (detached)
+            targets: (B, T) ground truth token IDs
+            temperature: softmax temperature (higher = softer distribution)
+            alpha: weight for hard label loss vs soft label loss
+        
+        Returns:
+            Scalar KD loss.
+        """
+        targets_device = targets.to(student_logits.device).long()
+        
+        if HAS_LIGER and student_logits.device.type == "cuda":
+            hard_loss = liger_cross_entropy(
+                student_logits.reshape(-1, self.vocab_size),
+                targets_device.reshape(-1)
+            )
+        else:
+            hard_loss = F.cross_entropy(
+                student_logits.reshape(-1, self.vocab_size),
+                targets_device.reshape(-1)
+            )
+        
+        student_log_probs = F.log_softmax(student_logits / temperature, dim=-1)
+        teacher_log_probs = F.log_softmax(teacher_logits.detach() / temperature, dim=-1)
+        
+        soft_loss = F.kl_div(
+            student_log_probs,
+            teacher_log_probs.exp(),
+            reduction='batchmean',
+        ) * (temperature ** 2)
+        
+        return alpha * hard_loss + (1.0 - alpha) * soft_loss

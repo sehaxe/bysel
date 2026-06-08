@@ -176,13 +176,14 @@ class BulbaGDN2SeRoPEBlock(nn.Module):
 
 @register("attention", "mla")
 class MultiHeadLatentAttention(nn.Module):
-    def __init__(self, d_model=1536, n_heads=12, d_c=128, use_differential=False):
+    def __init__(self, d_model=1536, n_heads=12, d_c=128, use_differential=False, use_qknorm_l2=False):
         super().__init__()
         self.d_model = d_model
         self.n_heads = n_heads
         self.d_c = d_c
         self.d_v = d_model // n_heads
         self.use_differential = use_differential
+        self.use_qknorm_l2 = use_qknorm_l2
 
         self.kv_compress = BitLinear_a4_8(d_model, d_c)
         self.kv_norm = RMSNorm(d_c)
@@ -213,10 +214,17 @@ class MultiHeadLatentAttention(nn.Module):
         q_latent = self.q_norm(self.q_compress(x))
         q = self.q_decompress(q_latent).view(B, T, self.n_heads, self.d_v).transpose(1, 2)
 
+        if self.use_qknorm_l2:
+            q = F.normalize(q, p=2, dim=-1)
+            k = F.normalize(k, p=2, dim=-1)
+
         attn1 = F.scaled_dot_product_attention(q, k, v)
         if self.use_differential:
             q2 = self.q2_decompress(self.q_norm(self.q2_compress(x))).view(B, T, self.n_heads, self.d_v).transpose(1, 2)
             k2 = self.k2_decompress(kv_latent).view(B, T, self.n_heads, self.d_v).transpose(1, 2)
+            if self.use_qknorm_l2:
+                q2 = F.normalize(q2, p=2, dim=-1)
+                k2 = F.normalize(k2, p=2, dim=-1)
             attn2 = F.scaled_dot_product_attention(q2, k2, v)
             context = (attn1 - attn2) * self.diff_lambda
         else:

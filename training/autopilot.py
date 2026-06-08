@@ -1,12 +1,17 @@
 """
-⚙️ busel AUTOPILOT v6.0 (PREDICTIVE CYBER-ENGINE)
-Содержит предиктивный подавитель взрывов, адаптивный клиппинг и динамический Weight Decay.
+⚙️ busel AUTOPILOT v6.3 (PREDICTIVE CYBER-ENGINE + WSD + WSD-S + wd33)
+Содержит предиктивный подавитель взрывов, адаптивный клиппинг, динамический Weight Decay,
+Warmup-Stable-Decay (WSD) расписание, WSD-S с переиспользованием чекпоинтов,
+и wd33 расписание для QAT (Mapping Schedule × Bit-Width, 2026).
 """
 import torch
 import math
 
 class buselAutoPilot:
-    def __init__(self, opt_engine, max_lr_muon, max_lr_adamw, target_wd=0.1, warmup_steps="auto", min_lr_ratio=0.1, noise_scale=0.01, noise_decay=0.999):
+    def __init__(self, opt_engine, max_lr_muon, max_lr_adamw, target_wd=0.1,
+                 warmup_steps="auto", min_lr_ratio=0.1, noise_scale=0.01,
+                 noise_decay=0.999, lr_schedule="cosine", wsd_decay_fraction=0.2,
+                 wsd_s_enabled=False, wsd_s_interval=1000, wsd_s_decay_steps=200):
         self.opt_engine = opt_engine
         self.max_lr_muon = max_lr_muon
         self.max_lr_adamw = max_lr_adamw
@@ -15,12 +20,23 @@ class buselAutoPilot:
         self.min_lr_ratio = min_lr_ratio
         self.noise_scale = noise_scale
         self.noise_decay = noise_decay
+        self.lr_schedule = lr_schedule
+        self.wsd_decay_fraction = wsd_decay_fraction
+        self.wsd_s_enabled = wsd_s_enabled
+        self.wsd_s_interval = wsd_s_interval
+        self.wsd_s_decay_steps = wsd_s_decay_steps
         
         self.loss_history = []
         self.grad_norm_history = []
         self.recovery_countdown = 0
         self.stabilization_factor = 1.0
         self.warmup_steps = 0
+        
+        self._wsd_s_phase = "stable"
+        self._wsd_s_step_in_phase = 0
+        self._wsd_s_cycle = 0
+        self._wsd_s_checkpoint_callback = None
+        self._wsd_s_load_callback = None
 
     def before_step(self, model, step, max_steps):
         if not any(p.grad is not None for p in model.parameters()):
@@ -82,6 +98,13 @@ class buselAutoPilot:
 
         return clipping_threshold
 
+    def set_wsd_s_callbacks(self, save_fn, load_fn):
+        self._wsd_s_checkpoint_callback = save_fn
+        self._wsd_s_load_callback = load_fn
+
+    def should_load_wsd_s_checkpoint(self):
+        return self._wsd_s_load_callback is not None
+
     def update_parameters(self, step, current_loss, max_steps):
         if step == 0 or self.warmup_steps == 0:
             if self.warmup_steps_raw == "auto" or self.warmup_steps_raw is None:
@@ -113,8 +136,45 @@ class buselAutoPilot:
             progress = min(1.0, max(0.0, progress))
             if progress > 0.90:
                 self.noise_scale = 0.0
-            cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
-            lr_factor = self.min_lr_ratio + (1.0 - self.min_lr_ratio) * cosine_decay
+
+            if self.wsd_s_enabled and self._wsd_s_phase == "decay":
+                decay_progress = float(self._wsd_s_step_in_phase) / float(self.wsd_s_decay_steps)
+                decay_progress = min(1.0, max(0.0, decay_progress))
+                lr_factor = 0.55 * (1.0 - math.sqrt(decay_progress))
+            elif self.lr_schedule == "wsd":
+                stable_end = 1.0 - self.wsd_decay_fraction
+                if progress < stable_end:
+                    lr_factor = 0.55
+                else:
+                    decay_progress = (progress - stable_end) / self.wsd_decay_fraction
+                    decay_progress = min(1.0, max(0.0, decay_progress))
+                    lr_factor = 0.55 * (1.0 - math.sqrt(decay_progress))
+            elif self.lr_schedule == "wd33":
+                cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+                lr_factor = self.min_lr_ratio + (1.0 - self.min_lr_ratio) * cosine_decay
+                if progress > 0.67:
+                    warmdown_progress = (progress - 0.67) / 0.33
+                    warmdown_progress = min(1.0, max(0.0, warmdown_progress))
+                    lr_factor = lr_factor * (1.0 - 0.9 * warmdown_progress)
+            else:
+                cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+                lr_factor = self.min_lr_ratio + (1.0 - self.min_lr_ratio) * cosine_decay
+
+            if self.wsd_s_enabled:
+                self._wsd_s_step_in_phase += 1
+                if self._wsd_s_phase == "stable" and self._wsd_s_step_in_phase >= self.wsd_s_interval:
+                    self._wsd_s_phase = "decay"
+                    self._wsd_s_step_in_phase = 0
+                    self._wsd_s_cycle += 1
+                    if self._wsd_s_checkpoint_callback:
+                        self._wsd_s_checkpoint_callback(f"wsd_s_cycle_{self._wsd_s_cycle}")
+                    print(f"\n🔄 [WSD-S]: Cycle {self._wsd_s_cycle} — switching to decay phase")
+                elif self._wsd_s_phase == "decay" and self._wsd_s_step_in_phase >= self.wsd_s_decay_steps:
+                    self._wsd_s_phase = "stable"
+                    self._wsd_s_step_in_phase = 0
+                    if self._wsd_s_load_callback:
+                        self._wsd_s_load_callback()
+                    print(f"\n🔄 [WSD-S]: Cycle {self._wsd_s_cycle} — resuming from decayed checkpoint")
             
         lr_factor *= self.stabilization_factor
         new_lr_muon = self.max_lr_muon * lr_factor

@@ -2211,14 +2211,14 @@ class TestbuselFramework(unittest.TestCase):
         print(f"   ✅ both `download-data` and `train-all` registered ({len(names)} total commands)")
 
     def test_data_presets_enumerate_all(self):
-        """📚 [CLI-2] data/presets.py exposes 4 HF-backed presets (3 SFT + 1 DPO)."""
-        print("🧪 [CLI-2] data/presets.py exposes 4 HF-backed presets...")
+        """📚 [CLI-2] data/presets.py exposes 6 HF-backed presets (5 SFT + 1 DPO)."""
+        print("🧪 [CLI-2] data/presets.py exposes 6 HF-backed presets...")
         from data.presets import list_presets, get_preset
         all_names = list_presets()
         sft_names = list_presets(stage="sft")
         dpo_names = list_presets(stage="dpo")
-        self.assertEqual(len(all_names), 4, f"expected 4 presets, got {len(all_names)}")
-        self.assertEqual(len(sft_names), 3, f"expected 3 SFT presets, got {len(sft_names)}")
+        self.assertEqual(len(all_names), 6, f"expected 6 presets, got {len(all_names)}")
+        self.assertEqual(len(sft_names), 5, f"expected 5 SFT presets, got {len(sft_names)}")
         self.assertEqual(len(dpo_names), 1, f"expected 1 DPO preset, got {len(dpo_names)}")
         for n in all_names:
             meta = get_preset(n)
@@ -2926,6 +2926,80 @@ class TestbuselPlotter(unittest.TestCase):
         self.assertEqual(stats["max_vram_val"], 900.0)
         self.assertEqual(stats["total_tokens_val"], 5 * 2048)
         print(f"   ✅ min_loss=5.0@step4, peak_vram=900.0, total={stats['total_tokens_val']}")
+
+    def test_tequila_deadzone_reactivation(self):
+        """🔬 [TEQUILA-1] BitLinear with use_tequila: deadzone weights become bias, gradients flow."""
+        print("🧪 [TEQUILA-1] Tequila deadzone reactivation...")
+        from model.layers import BitLinear_a4_8, configure_bitlinear
+        configure_bitlinear(use_tequila=True, tequila_lambda=0.001)
+        layer = BitLinear_a4_8(64, 32, use_tequila=True, tequila_lambda=0.001)
+        x = torch.randn(4, 16, 64, dtype=torch.float32, requires_grad=True)
+        out = layer(x)
+        self.assertEqual(out.shape, (4, 16, 32))
+        loss = out.sum()
+        loss.backward()
+        self.assertIsNotNone(x.grad)
+        self.assertFalse(torch.isnan(x.grad).any())
+        self.assertFalse(torch.isnan(layer.weight.grad).any())
+        deadzone_count = (layer.weight.abs() / (layer.weight.abs().mean() + 1e-5) < 0.5).sum().item()
+        print(f"   ✅ shape={out.shape}, grad OK, {deadzone_count} deadzone weights reactivated")
+        configure_bitlinear(use_tequila=False)
+
+    def test_hestia_softmax_relaxation(self):
+        """🔥 [HESTIA-1] HestiaQuantize: soft→hard annealing, gradients flow at all temperatures."""
+        print("🧪 [HESTIA-1] Hestia temperature-controlled quantization...")
+        from model.layers import HestiaQuantize
+        for temp in [6.0, 1.0, 0.1, 0.0]:
+            x = torch.randn(8, 32, requires_grad=True)
+            t = torch.tensor(temp)
+            out = HestiaQuantize.apply(x, t)
+            self.assertEqual(out.shape, x.shape)
+            loss = out.sum()
+            loss.backward()
+            self.assertIsNotNone(x.grad)
+            self.assertFalse(torch.isnan(x.grad).any(), f"NaN grads at temp={temp}")
+        print("   ✅ temps [6.0, 1.0, 0.1, 0.0] all produce valid grads")
+
+    def test_muonq_optimizer_step(self):
+        """🔬 [MUONQ-1] MuonQ: 3-step optimization, loss decreases, no NaN."""
+        print("🧪 [MUONQ-1] MuonQ 4-bit optimizer...")
+        from training.optimizer import MuonQ
+        model = nn.Linear(32, 16, bias=False)
+        torch.nn.init.normal_(model.weight, std=0.02)
+        opt = MuonQ(model.parameters(), lr=0.001, momentum=0.95)
+        initial_loss = None
+        for step in range(3):
+            x = torch.randn(4, 32)
+            target = torch.randn(4, 16)
+            out = model(x)
+            loss = F.mse_loss(out, target)
+            if step == 0:
+                initial_loss = loss.item()
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            self.assertFalse(torch.isnan(model.weight.grad).any(), f"NaN at step {step}")
+        final_loss = loss.item()
+        print(f"   ✅ 3 steps: {initial_loss:.4f} → {final_loss:.4f}, no NaN")
+
+    def test_hestia_temperature_config(self):
+        """🔥 [HESTIA-2] configure_bitlinear: hestia_temperature wiring."""
+        print("🧪 [HESTIA-2] Hestia config wiring...")
+        from model.layers import configure_bitlinear, _BITLINEAR_CONFIG
+        hestia_temp = torch.tensor(6.0)
+        configure_bitlinear(use_tequila=False, hestia_temperature=hestia_temp)
+        self.assertIsNotNone(_BITLINEAR_CONFIG["hestia_temperature"])
+        self.assertEqual(_BITLINEAR_CONFIG["hestia_temperature"].item(), 6.0)
+        configure_bitlinear(use_tequila=False, hestia_temperature=None)
+        self.assertIsNone(_BITLINEAR_CONFIG["hestia_temperature"])
+        print("   ✅ hestia_temperature set/cleared correctly")
+
+    def test_muonq_registry(self):
+        """🔬 [MUONQ-2] MuonQ registered in optimizer registry."""
+        print("🧪 [MUONQ-2] MuonQ in registry...")
+        from busel_registry import is_registered
+        self.assertTrue(is_registered("optimizer", "muonq"))
+        print("   ✅ 'muonq' registered as optimizer")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # PROJECT KNOWLEDGE BASE — busel (Бусел)
 
-**Last updated:** 2026-06-05
+**Last updated:** 2026-06-08
 **Branch:** main
 **Test count:** 171 (unittest, no pytest)
 
@@ -13,7 +13,7 @@
 ## OVERVIEW
 **busel v6.x** — Sovereign 1-bit (1.58b) Any-to-Text LLM. Hybrid Python + Rust (PyO3 via maturin). Targets consumer HW (RTX 5060 Ti 16 GB / Apple Silicon). Trained via CLI, documented in `site/` (Astro+Starlight, Bun).
 
-**Architecture:** 1.58-bit ternary weights · byte-level vocab=326 · `stride=4` patching · 3:1 GDN-2:MLA attention · mAR residuals (Sinkhorn-Knopp on Birkhoff polytope) · **Top-1 MoE** with Blackboard Memory · MTP-4 heads · **LOTUS+Muon** (rank-8 factorised) + AdamW hybrid · **EMA of weights** · **selective activation checkpointing** (every=2) · **LCSB selective per-layer backward** (default ON in shpak/zubr/chyzh, v6.0) · **decoupled per-layer LR** (6 sub-groups) · **multi-stage pipeline** (pretrain → SFT → DPO → eval, v5.5) · **REPL tool executor** (v5.7) · **compile-safe checkpoint loader** (v5.7.1) · **v6.0 research features** (Schedule-Free, Cautious, Differential Attn, LCSB) · **v6.1 research feature**: Dispersion Loss (Wang 2026).
+**Architecture:** 1.58-bit ternary weights · byte-level vocab=326 · `stride=4` patching · 3:1 GDN-2:MLA attention · mAR residuals (Sinkhorn-Knopp on Birkhoff polytope) · **Top-1 MoE** with Blackboard Memory · MTP-4 heads · **LOTUS+Muon** (rank-8 factorised) + AdamW hybrid · **EMA of weights** · **selective activation checkpointing** (every=2) · **LCSB selective per-layer backward** (default ON in shpak/zubr/chyzh, v6.0) · **decoupled per-layer LR** (6 sub-groups) · **multi-stage pipeline** (pretrain → SFT → DPO → eval, v5.5) · **REPL tool executor** (v5.7) · **compile-safe checkpoint loader** (v5.7.1) · **v6.0 research features** (Schedule-Free, Cautious, Differential Attn, LCSB) · **v6.1 research feature**: Dispersion Loss (Wang 2026) · **v6.2–v6.3 research features** (SOAP, QuEST, WSD-S, wd33, 50 M+ scale gate).
 
 ## STRUCTURE
 ```
@@ -77,6 +77,26 @@ All 6 profiles in `configs/default.yaml` (validation, micro_test, quick_test, ch
 | `dispersion_weight` | `0.1` | Multiplicative scale on the uniformity loss. | — |
 | `dispersion_temperature` | `2.0` | t in the uniformity loss exp(−t·d²). | — |
 
+## v6.2–v6.3 OPT-IN RESEARCH FEATURES (defaults OFF — profile before flipping)
+| Field | Default | Why OFF by default | Measured on shpak 52.8M |
+|---|---|---|---|
+| `optimizer_type: "soap"` (training) | `False` | **🆕 v6.2** — SOAP (Vyas et al. 2025, ICLR 2025). Shampoo eigenspace + Adam. Maintains factored second-moment estimates L, R per 2D param; periodically eigendecomposes and applies Adam-like update in eigenspace. −40 % iterations vs AdamW; overhead from eigendecomposition every N steps. For 1D params falls back to Adam. Memory: O(d1² + d2²) per 2D param. | — (needs 50+ step validation) |
+| `use_quest` (training) | `False` | **🆕 v6.2** — QuEST (Panferov et al. 2025, ICML 2025). Trust gradient estimator for ternary training. Hadamard rotation whitens weight distribution, MSE-optimal ternary grid fitting, trust gradient correction reduces bias vs naive STE. ~5 % step-time overhead. Wraps any base optimizer. | — (needs 50+ step validation) |
+| `quest_bits` (training) | `1.58` | Bit-width for QuEST ternary grid fitting. | — |
+| `lr_schedule: "wsd"` (training) | `"cosine"` | **🆕 v6.3** — Warmup-Stable-Decay schedule. Flat LR for first (1−decay_fraction) of training, then sqrt decay. | — |
+| `lr_schedule: "wd33"` (training) | `"cosine"` | **🆕 v6.3** — Warmdown-to-33 % (Mapping Schedule × Bit-Width, 2026). Cosine + warmdown to 33 % of peak LR in last 33 % of training. Optimal at all bit-widths for sub-100 M models. | — |
+| `wsd_s_enabled` (training) | `False` | **🆕 v6.3** — WSD-S checkpoint reuse (ICLR 2025). Reuses decay-phase checkpoints for the next cycle. Outperforms WSD and Cyclic-Cosine. | — (needs 50+ step validation) |
+| `wsd_s_interval` (training) | `1000` | Steps in stable phase before switching to decay. | — |
+| `wsd_s_decay_steps` (training) | `200` | Steps in decay phase. | — |
+| `use_tequila` (training) | `False` | **🆕 v7.0** — Tequila (Huang et al. 2025, ICLR 2026). Deadzone trapping fix. Reactivates weights trapped at quantization boundary (|w| < Δ) as dynamic biases, providing direct gradients. >4 % accuracy gain on ARC. Zero inference overhead. | — (needs 50+ step validation) |
+| `tequila_lambda` (training) | `0.001` | Tequila reactivation scale (λ in paper). | — |
+| `use_hestia` (model) | `False` | **🆕 v7.0** — Hestia (Wang et al. 2026). Hessian-guided QAT. Temperature-controlled softmax relaxation replaces STE. Hessian trace drives per-layer temperature annealing. 5.39 % avg zero-shot improvement on Llama-3.2-1B. | — (needs 50+ step validation) |
+| `hestia_init_temp` (training) | `6.0` | Initial temperature for softmax relaxation. | — |
+| `hestia_end_temp` (training) | `0.0` | Final temperature (0 = hard quantization). | — |
+| `optimizer_type: "muonq"` (training) | `False` | **🆕 v7.0** — MuonQ (Su et al. 2025). 4-bit Muon via directional fidelity optimization. Pre-quantization normalization, power-iteration structural decomposition, μ-law companding. 7.3× memory reduction vs full-precision Muon. | — (needs 50+ step validation) |
+
+**Scale gate (50 M+):** automatically disables heavy optimizations (SOAP, Adafactor, QuEST, QK-Norm L2, NorMuon, MuonQ, Hestia) when model params < 50 M. Falls back to lotus_muon. These optimizations have overhead that outweighs benefits at small scale. Threshold: `_SCALE_THRESHOLD = 50_000_000` in `training/stages/pretrain.py`.
+
 ## WHERE TO LOOK
 | Task | Location | Notes |
 |------|----------|-------|
@@ -96,7 +116,7 @@ All 6 profiles in `configs/default.yaml` (validation, micro_test, quick_test, ch
 
 ## DO
 - **Use the registry** for any plug-in point (attention, optimizer, encoder, autopilot, curriculum, loss, stage). `@register("kind", "name")` — no central switch statements.
-- **Run 171 tests before pushing:** `uv run python -m unittest tests.test_suite` — all must pass.
+- **Run 176 tests before pushing:** `uv run python -m unittest tests.test_suite` — all must pass.
 - **Update README.md AND site/ docs** when a feature changes. The two-track rule: code change → README change → site/ change. Site/ is the human-friendly tour, README is the elevator pitch.
 - **Match existing patterns.** Sample 2-3 similar files before adding a new one. Busel is small — patterns are visible at a glance.
 - **Profile with `tests/profiler_run.py`** before claiming a speedup. Numbers, not vibes.
@@ -173,6 +193,9 @@ cd site && bun install && bun run build           # GitHub Pages deploy
 # Profile research features (2 modes: v6.0 cumulative + v6.1 dispersion)
 uv run python tests/v58_profile.py --mode shpak-v60    # v6.0 cumulative on shpak 52.8M (5 runs adding DA, Cautious, SF, LCSB)
 uv run python tests/v58_profile.py --mode shpak-disp   # v6.1 dispersion on shpak 52.8M (4 runs: baseline, +Dispersion, v6.0 winner, v6.1 winner)
+
+# Quick IMU-1 vs baseline profiler (~5 min on RTX 5060 Ti)
+uv run python tests/quick_imu1_profile.py              # baseline vs imu1 comparison (2M params)
 ```
 
 ## PER-MODULE RULES
@@ -188,11 +211,16 @@ This file is the project-level summary. Module-specific rules, anti-patterns, an
 - [site/AGENTS.md](file:///home/sehaxe/busel-ai/site/AGENTS.md) — Astro+Starlight, build commands, URL structure
 
 ## NOTES
+- **Busel Scaling Laws (two-tier, experimental):** Ternary weights (1.58-bit) hold ~30× less info per param than fp16.
+  - **Small models (<3B params):** 37 tok/param (empirical, from 2.68M-param benchmark). Model saturates earlier due to limited capacity per param.
+  - **Large models (≥3B params):** 80 tok/param (matches BitNet/chinchilla for fp16). Large 1.58-bit models regain fp16-equivalent scaling per Microsoft BitNet findings.
+  - For shpak (52.8M < 3B): optimal D ≈ 2B tokens, not 4.2B. Training time: ~10h, not ~20h.
+  - See `tests/scaling_laws.py` and README "Busel Scaling Laws" section for full derivation.
 - **Checkpoint size guard:** reject `<10MB` `.pt` (corrupt) in `tools/inference.py`.
 - **Target bit size:** 11 MB (Shpak) / 30 MB (Zubr) — 1.58-bit weights compress ~10× vs fp16.
 - **Metrics log:** `checkpoints/metrics.jsonl` (one JSON per step, for ETA).
-- **Event stream:** `checkpoints/busel.log.jsonl` — structured JSON for downstream (TG bot, web). Events: `training_start`, `model_initialized`, `chinchilla_planned`, `curriculum_upgrade`, `step_complete`, `checkpoint_saved`/`checkpoint_rejected`/`checkpoint_failed`, `emergency_save_requested`, `emergency_checkpoint`, `stage_complete`, `pipeline_start`/`pipeline_complete`, `stage_failed`, `training_complete`, `autopilot`.
-- **Registry kinds:** `attention` (`gdn2`, `mla`), `optimizer` (`muon`, `lotus_muon`, `hybrid_muon_adamw`), `autopilot` (`v6`), `curriculum` (`doubling`), `encoder` (`image`, `video`, `audio`, `pdf`, `docx`, `text`), `loss`, `stage` (`pretrain`, `sft`, `dpo`, `eval`).
+- **Event stream:** `checkpoints/busel.log.jsonl` — structured JSON for downstream (TG bot, web). Events: `training_start`, `model_initialized`, `busel_scaling_planned`, `curriculum_upgrade`, `step_complete`, `checkpoint_saved`/`checkpoint_rejected`/`checkpoint_failed`, `emergency_save_requested`, `emergency_checkpoint`, `stage_complete`, `pipeline_start`/`pipeline_complete`, `stage_failed`, `training_complete`, `autopilot`.
+- **Registry kinds:** `attention` (`gdn2`, `mla`), `optimizer` (`muon`, `lotus_muon`, `hybrid_muon_adamw`, `normuon`, `norlotus_muon`, `soap`, `muonq`), `autopilot` (`v6`), `curriculum` (`doubling`), `encoder` (`image`, `video`, `audio`, `pdf`, `docx`, `text`), `loss`, `stage` (`pretrain`, `sft`, `dpo`, `eval`).
 - **Teto emoticon cycle:** 12-frame kawaii idle loop (`(ᗜˬᗜ)`, `ξ(｡•̀ᴗ-)✧ξ`, `ξ(≧◡≦)ξ`, `▼ᗜˬᗜ▼`, …) — see `ui.teto.frames()`. States: `idle`, `blink`, `smile`, `think`, `wave`, `training`, `done`.
 - **macOS Rust flag:** `.cargo/config.toml` uses `link-arg=-undefined,dynamic_lookup` for macOS.
 - **License:** CC BY-NC-SA 4.0 (NC clause — NO commercial use). Contact `sehaxe` for commercial licence.

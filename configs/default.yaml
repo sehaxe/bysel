@@ -121,72 +121,155 @@ profiles:
       keep_last_n: 5
       dynamic_compile: true
 
-  shpak:
+  # ═══════════════════════════════════════════════════════════════
+  # BUSEL SCALING LAWS — 5 sizes from ~0.2M to ~30M params
+  # All share: chunk_size=512, batch_size=2048, 2000 steps
+  # No LCSB, no compile — clean measurement of architecture quality
+  # ═══════════════════════════════════════════════════════════════
+
+  scale_xs:
     model:
-      d_model: 384
-      n_layers: 8
-      n_heads: 6
-      expert_hidden: 768
-      num_experts: 4
+      d_model: 64
+      n_layers: 2
+      n_heads: 4
+      expert_hidden: 128
+      num_experts: 2
       top_k: 1
-      vocab_size: 326        # 256 raw bytes + 3 legacy + 67 plug-in specials
-      selective_backward: true
-      backward_ratio: 0.5
+      vocab_size: 326
+      selective_backward: false
+      backward_ratio: 1.0
     data:
       data_path: "data_train"
-      chunk_size: 4096
+      chunk_size: 512
+      batch_size: 2048
+    training:
+      max_steps: 2000
+      warmup_steps: 100
+      min_lr_ratio: 0.1
+      learning_rate_muon: 0.003
+      learning_rate_adamw: 0.0003
+      weight_decay: 0.1
+      grad_accum_steps: 1
+      checkpoint_interval: 500
+      use_dispersion_loss: false
+      dispersion_weight: 0.1
+      dispersion_temperature: 2.0
+
+  scale_s:
+    model:
+      d_model: 96
+      n_layers: 3
+      n_heads: 3
+      expert_hidden: 192
+      num_experts: 2
+      top_k: 1
+      vocab_size: 326
+      selective_backward: false
+      backward_ratio: 1.0
+    data:
+      data_path: "data_train"
+      chunk_size: 512
+      batch_size: 2048
+    training:
+      max_steps: 2000
+      warmup_steps: 100
+      min_lr_ratio: 0.1
+      learning_rate_muon: 0.003
+      learning_rate_adamw: 0.0003
+      weight_decay: 0.1
+      grad_accum_steps: 1
+      checkpoint_interval: 500
+      use_dispersion_loss: false
+      dispersion_weight: 0.1
+      dispersion_temperature: 2.0
+
+  scale_m:
+    model:
+      d_model: 128
+      n_layers: 4
+      n_heads: 4
+      expert_hidden: 256
+      num_experts: 2
+      top_k: 1
+      vocab_size: 326
+      selective_backward: false
+      backward_ratio: 1.0
+    data:
+      data_path: "data_train"
+      chunk_size: 512
       batch_size: 128
     training:
-      max_steps: "auto"
-      warmup_steps: "auto"
+      max_steps: 2000
+      warmup_steps: 100
       min_lr_ratio: 0.1
-      learning_rate_muon: 0.0006
-      learning_rate_adamw: 0.00006
+      learning_rate_muon: 0.003
+      learning_rate_adamw: 0.0003
       weight_decay: 0.1
-      grad_accum_steps: 1   # Auto-Batcher адаптирует батч сам
+      grad_accum_steps: 1
+      checkpoint_interval: 500
       use_dispersion_loss: false
       dispersion_weight: 0.1
       dispersion_temperature: 2.0
-    perf:
-      inductor_cache_dir: "~/.cache/busel/inductor"
-      inductor_cache_clean: false
-      inductor_cache_max_gb: 0.0
-      dynamic_compile: true
-      keep_last_n: 5
 
-  zubr:
+  scale_l:
     model:
-      d_model: 384
-      n_layers: 12
-      n_heads: 6
-      expert_hidden: 1024
-      num_experts: 8
+      d_model: 192
+      n_layers: 6
+      n_heads: 3
+      expert_hidden: 384
+      num_experts: 4
       top_k: 1
-      vocab_size: 326        # 256 raw bytes + 3 legacy + 67 plug-in specials
-      n_hyper: 4
-      selective_backward: true
-      backward_ratio: 0.5
+      vocab_size: 326
+      selective_backward: false
+      backward_ratio: 1.0
     data:
       data_path: "data_train"
-      chunk_size: 16384
-      batch_size: 32
+      chunk_size: 512
+      batch_size: 2048
     training:
-      max_steps: "auto"
-      warmup_steps: "auto"
+      max_steps: 2000
+      warmup_steps: 100
       min_lr_ratio: 0.1
-      learning_rate_muon: 0.0006
-      learning_rate_adamw: 0.00006
+      learning_rate_muon: 0.003
+      learning_rate_adamw: 0.0003
       weight_decay: 0.1
-      grad_accum_steps: 1   # Auto-Batcher адаптирует батч сам
+      grad_accum_steps: 1
+      checkpoint_interval: 500
       use_dispersion_loss: false
       dispersion_weight: 0.1
       dispersion_temperature: 2.0
-    perf:
-      inductor_cache_dir: "~/.cache/busel/inductor"
-      inductor_cache_clean: false
-      inductor_cache_max_gb: 0.0
-      dynamic_compile: true
-      keep_last_n: 5
+
+  scale_xl:
+    model:
+      d_model: 256
+      n_layers: 8
+      n_heads: 4
+      expert_hidden: 512
+      num_experts: 4
+      top_k: 1
+      vocab_size: 326
+      selective_backward: false
+      backward_ratio: 1.0
+    data:
+      data_path: "data_train"
+      chunk_size: 512
+      batch_size: 2048
+    training:
+      max_steps: 2000
+      warmup_steps: 100
+      min_lr_ratio: 0.1
+      learning_rate_muon: 0.003
+      learning_rate_adamw: 0.0003
+      weight_decay: 0.1
+      grad_accum_steps: 1
+      checkpoint_interval: 500
+      use_dispersion_loss: false
+      dispersion_weight: 0.1
+      dispersion_temperature: 2.0
+
+  # ═══════════════════════════════════════════════════════════════
+  # END SCALING LAW PROFILES
+  # ═══════════════════════════════════════════════════════════════
 
   shpak:
     model:
@@ -221,6 +304,43 @@ profiles:
       keep_last_n: 5
       dynamic_compile: true
 
+  # ═══════════════════════════════════════════════════════════════
+  # noc — 18-hour overnight profile (~75M params)
+  # Optimized for RTX 5060 Ti 16 GB, trains to optimal in ~16h
+  # ═══════════════════════════════════════════════════════════════
+  noc:
+    model:
+      d_model: 448           # ~75M params (448/384)^2 * 52.8M ≈ 72M
+      n_layers: 8
+      n_heads: 7             # 448 / 7 = 64 per head
+      expert_hidden: 896     # 2 * d_model
+      num_experts: 4
+      top_k: 1
+      vocab_size: 326
+      selective_backward: true
+      backward_ratio: 0.5
+    data:
+      data_path: "data_train"
+      chunk_size: 4096
+      batch_size: 32         # Slightly smaller batch for larger model
+    training:
+      max_steps: "auto"      # Auto-computed from Busel Scaling Laws
+      warmup_steps: "auto"
+      min_lr_ratio: 0.1
+      learning_rate_muon: 0.0010
+      learning_rate_adamw: 0.0001
+      weight_decay: 0.1
+      grad_accum_steps: 1
+      use_dispersion_loss: false
+      dispersion_weight: 0.1
+      dispersion_temperature: 2.0
+    perf:
+      inductor_cache_dir: "~/.cache/busel/inductor"
+      inductor_cache_clean: false
+      inductor_cache_max_gb: 0.0
+      keep_last_n: 5
+      dynamic_compile: true
+
   zubr:
     model:
       d_model: 384
@@ -245,6 +365,356 @@ profiles:
       learning_rate_adamw: 0.00006
       weight_decay: 0.1
       grad_accum_steps: 1   # Auto-Batcher адаптирует батч сам
+      use_dispersion_loss: false
+      dispersion_weight: 0.1
+      dispersion_temperature: 2.0
+    perf:
+      inductor_cache_dir: "~/.cache/busel/inductor"
+      inductor_cache_clean: false
+      inductor_cache_max_gb: 0.0
+      keep_last_n: 5
+      dynamic_compile: true
+
+  # ═══════════════════════════════════════════════════════════════
+  # IMU-1 RECIPE — Research-optimized profile (arXiv:2602.02522)
+  # NorMuon + LOTUS + WSD schedule + QK-Norm + Cautious WD
+  # ═══════════════════════════════════════════════════════════════
+  imu1:
+    model:
+      d_model: 384
+      n_layers: 8
+      n_heads: 6
+      expert_hidden: 768
+      num_experts: 4
+      top_k: 1
+      vocab_size: 326
+      selective_backward: true
+      backward_ratio: 0.5
+      use_qknorm_l2: true
+    data:
+      data_path: "data_train"
+      chunk_size: 4096
+      batch_size: 128
+    training:
+      max_steps: "auto"
+      warmup_steps: "auto"
+      min_lr_ratio: 0.1
+      learning_rate_muon: 0.0006
+      learning_rate_adamw: 0.00006
+      weight_decay: 0.1
+      grad_accum_steps: 1
+      optimizer_type: "norlotus_muon"
+      lr_schedule: "wsd"
+      wsd_decay_fraction: 0.2
+      use_adafactor: true
+      use_dispersion_loss: false
+      dispersion_weight: 0.1
+      dispersion_temperature: 2.0
+    perf:
+      inductor_cache_dir: "~/.cache/busel/inductor"
+      inductor_cache_clean: false
+      inductor_cache_max_gb: 0.0
+      keep_last_n: 5
+      dynamic_compile: true
+
+  # ═══════════════════════════════════════════════════════════════
+  # SALT RECIPE — Knowledge Distillation from small model
+  # Uses chyzh as teacher for shpak student (arXiv:2507.07101)
+  # ═══════════════════════════════════════════════════════════════
+  salt:
+    model:
+      d_model: 384
+      n_layers: 8
+      n_heads: 6
+      expert_hidden: 768
+      num_experts: 4
+      top_k: 1
+      vocab_size: 326
+      selective_backward: true
+      backward_ratio: 0.5
+    data:
+      data_path: "data_train"
+      chunk_size: 4096
+      batch_size: 128
+    training:
+      max_steps: "auto"
+      warmup_steps: "auto"
+      min_lr_ratio: 0.1
+      learning_rate_muon: 0.0006
+      learning_rate_adamw: 0.00006
+      weight_decay: 0.1
+      grad_accum_steps: 1
+      use_salt: true
+      salt_teacher_profile: "chyzh"
+      salt_kd_temperature: 2.0
+      salt_kd_alpha: 0.5
+      salt_kd_steps: 5000
+      use_dispersion_loss: false
+      dispersion_weight: 0.1
+      dispersion_temperature: 2.0
+    perf:
+      inductor_cache_dir: "~/.cache/busel/inductor"
+      inductor_cache_clean: false
+      inductor_cache_max_gb: 0.0
+      keep_last_n: 5
+      dynamic_compile: true
+
+  # ═══════════════════════════════════════════════════════════════
+  # SOAP RECIPE — Shampoo eigenspace + Adam (Vyas et al. 2025)
+  # ═══════════════════════════════════════════════════════════════
+  soap:
+    model:
+      d_model: 384
+      n_layers: 8
+      n_heads: 6
+      expert_hidden: 768
+      num_experts: 4
+      top_k: 1
+      vocab_size: 326
+      selective_backward: true
+      backward_ratio: 0.5
+    data:
+      data_path: "data_train"
+      chunk_size: 4096
+      batch_size: 128
+    training:
+      max_steps: "auto"
+      warmup_steps: "auto"
+      min_lr_ratio: 0.1
+      learning_rate_muon: 0.0006
+      learning_rate_adamw: 0.00006
+      weight_decay: 0.1
+      grad_accum_steps: 1
+      optimizer_type: "soap"
+      use_dispersion_loss: false
+      dispersion_weight: 0.1
+      dispersion_temperature: 2.0
+    perf:
+      inductor_cache_dir: "~/.cache/busel/inductor"
+      inductor_cache_clean: false
+      inductor_cache_max_gb: 0.0
+      keep_last_n: 5
+      dynamic_compile: true
+
+  # ═══════════════════════════════════════════════════════════════
+  # QuEST RECIPE — Trust gradient for ternary training (Panferov 2025)
+  # ═══════════════════════════════════════════════════════════════
+  quest:
+    model:
+      d_model: 384
+      n_layers: 8
+      n_heads: 6
+      expert_hidden: 768
+      num_experts: 4
+      top_k: 1
+      vocab_size: 326
+      selective_backward: true
+      backward_ratio: 0.5
+    data:
+      data_path: "data_train"
+      chunk_size: 4096
+      batch_size: 128
+    training:
+      max_steps: "auto"
+      warmup_steps: "auto"
+      min_lr_ratio: 0.1
+      learning_rate_muon: 0.0006
+      learning_rate_adamw: 0.00006
+      weight_decay: 0.1
+      grad_accum_steps: 1
+      use_quest: true
+      quest_bits: 1.58
+      use_dispersion_loss: false
+      dispersion_weight: 0.1
+      dispersion_temperature: 2.0
+    perf:
+      inductor_cache_dir: "~/.cache/busel/inductor"
+      inductor_cache_clean: false
+      inductor_cache_max_gb: 0.0
+      keep_last_n: 5
+      dynamic_compile: true
+
+  # ═══════════════════════════════════════════════════════════════
+  # WSD-S RECIPE — Warmup-Stable-Decay with checkpoint reuse
+  # ═══════════════════════════════════════════════════════════════
+  wsds:
+    model:
+      d_model: 384
+      n_layers: 8
+      n_heads: 6
+      expert_hidden: 768
+      num_experts: 4
+      top_k: 1
+      vocab_size: 326
+      selective_backward: true
+      backward_ratio: 0.5
+    data:
+      data_path: "data_train"
+      chunk_size: 4096
+      batch_size: 128
+    training:
+      max_steps: "auto"
+      warmup_steps: "auto"
+      min_lr_ratio: 0.1
+      learning_rate_muon: 0.0006
+      learning_rate_adamw: 0.00006
+      weight_decay: 0.1
+      grad_accum_steps: 1
+      lr_schedule: "wsd"
+      wsd_s_enabled: true
+      wsd_s_interval: 1000
+      wsd_s_decay_steps: 200
+      use_dispersion_loss: false
+      dispersion_weight: 0.1
+      dispersion_temperature: 2.0
+    perf:
+      inductor_cache_dir: "~/.cache/busel/inductor"
+      inductor_cache_clean: false
+      inductor_cache_max_gb: 0.0
+      keep_last_n: 5
+      dynamic_compile: true
+
+  # ═══════════════════════════════════════════════════════════════
+  # WD33 RECIPE — Warmdown-to-33% (optimal for QAT, 2026)
+  # ═══════════════════════════════════════════════════════════════
+  wd33:
+    model:
+      d_model: 384
+      n_layers: 8
+      n_heads: 6
+      expert_hidden: 768
+      num_experts: 4
+      top_k: 1
+      vocab_size: 326
+      selective_backward: true
+      backward_ratio: 0.5
+    data:
+      data_path: "data_train"
+      chunk_size: 4096
+      batch_size: 128
+    training:
+      max_steps: "auto"
+      warmup_steps: "auto"
+      min_lr_ratio: 0.1
+      learning_rate_muon: 0.0006
+      learning_rate_adamw: 0.00006
+      weight_decay: 0.1
+      grad_accum_steps: 1
+      lr_schedule: "wd33"
+      use_dispersion_loss: false
+      dispersion_weight: 0.1
+      dispersion_temperature: 2.0
+    perf:
+      inductor_cache_dir: "~/.cache/busel/inductor"
+      inductor_cache_clean: false
+      inductor_cache_max_gb: 0.0
+      keep_last_n: 5
+      dynamic_compile: true
+
+  # ═══════════════════════════════════════════════════════════════
+  # TEQUILA — Deadzone trapping fix (Huang et al. 2025, ICLR 2026)
+  # ═══════════════════════════════════════════════════════════════
+  tequila:
+    model:
+      d_model: 384
+      n_layers: 8
+      n_heads: 6
+      expert_hidden: 768
+      num_experts: 4
+      top_k: 1
+      vocab_size: 326
+      selective_backward: true
+      backward_ratio: 0.5
+    data:
+      data_path: "data_train"
+      chunk_size: 4096
+      batch_size: 128
+    training:
+      max_steps: "auto"
+      warmup_steps: "auto"
+      min_lr_ratio: 0.1
+      learning_rate_muon: 0.0006
+      learning_rate_adamw: 0.00006
+      weight_decay: 0.1
+      grad_accum_steps: 1
+      use_tequila: true
+      tequila_lambda: 0.001
+      use_dispersion_loss: false
+      dispersion_weight: 0.1
+      dispersion_temperature: 2.0
+    perf:
+      inductor_cache_dir: "~/.cache/busel/inductor"
+      inductor_cache_clean: false
+      inductor_cache_max_gb: 0.0
+      keep_last_n: 5
+      dynamic_compile: true
+
+  # ═══════════════════════════════════════════════════════════════
+  # HESTIA — Hessian-guided QAT (Wang et al. 2026)
+  # ═══════════════════════════════════════════════════════════════
+  hestia:
+    model:
+      d_model: 384
+      n_layers: 8
+      n_heads: 6
+      expert_hidden: 768
+      num_experts: 4
+      top_k: 1
+      vocab_size: 326
+      selective_backward: true
+      backward_ratio: 0.5
+      use_hestia: true
+    data:
+      data_path: "data_train"
+      chunk_size: 4096
+      batch_size: 128
+    training:
+      max_steps: "auto"
+      warmup_steps: "auto"
+      min_lr_ratio: 0.1
+      learning_rate_muon: 0.0006
+      learning_rate_adamw: 0.00006
+      weight_decay: 0.1
+      grad_accum_steps: 1
+      hestia_init_temp: 6.0
+      hestia_end_temp: 0.0
+      use_dispersion_loss: false
+      dispersion_weight: 0.1
+      dispersion_temperature: 2.0
+    perf:
+      inductor_cache_dir: "~/.cache/busel/inductor"
+      inductor_cache_clean: false
+      inductor_cache_max_gb: 0.0
+      keep_last_n: 5
+      dynamic_compile: true
+
+  # ═══════════════════════════════════════════════════════════════
+  # MUONQ — 4-bit Muon optimizer (Su et al. 2025)
+  # ═══════════════════════════════════════════════════════════════
+  muonq:
+    model:
+      d_model: 384
+      n_layers: 8
+      n_heads: 6
+      expert_hidden: 768
+      num_experts: 4
+      top_k: 1
+      vocab_size: 326
+      selective_backward: true
+      backward_ratio: 0.5
+    data:
+      data_path: "data_train"
+      chunk_size: 4096
+      batch_size: 128
+    training:
+      max_steps: "auto"
+      warmup_steps: "auto"
+      min_lr_ratio: 0.1
+      learning_rate_muon: 0.0006
+      learning_rate_adamw: 0.00006
+      weight_decay: 0.1
+      grad_accum_steps: 1
+      optimizer_type: "muonq"
       use_dispersion_loss: false
       dispersion_weight: 0.1
       dispersion_temperature: 2.0

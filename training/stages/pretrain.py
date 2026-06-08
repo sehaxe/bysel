@@ -115,10 +115,29 @@ class buselPretrainConfig:
     sf_beta: float = 0.9
     sf_gamma_factor: float = 2.0
     use_cautious: bool = False
+    use_adafactor: bool = False
     use_differential_attention: bool = False
+    use_qknorm_l2: bool = False
     use_dispersion_loss: bool = False
     dispersion_weight: float = 0.1
     dispersion_temperature: float = 2.0
+    use_salt: bool = False
+    salt_teacher_profile: str = "chyzh"
+    salt_kd_temperature: float = 2.0
+    salt_kd_alpha: float = 0.5
+    salt_kd_steps: int = 0
+    lr_schedule: str = "cosine"
+    wsd_decay_fraction: float = 0.2
+    use_quest: bool = False
+    quest_bits: float = 1.58
+    wsd_s_enabled: bool = False
+    wsd_s_interval: int = 1000
+    wsd_s_decay_steps: int = 200
+    use_tequila: bool = False
+    tequila_lambda: float = 1e-3
+    use_hestia: bool = False
+    hestia_init_temp: float = 6.0
+    hestia_end_temp: float = 0.0
     inductor_cache_dir: str = "~/.cache/busel/inductor"
     inductor_cache_clean: bool = False
     inductor_cache_max_gb: float = 0.0
@@ -152,13 +171,32 @@ class buselPretrainConfig:
         cfg.selective_backward = bool(m.get("selective_backward", cfg.selective_backward))
         cfg.backward_ratio = float(m.get("backward_ratio", cfg.backward_ratio))
         cfg.use_differential_attention = bool(m.get("use_differential_attention", cfg.use_differential_attention))
+        cfg.use_qknorm_l2 = bool(m.get("use_qknorm_l2", cfg.use_qknorm_l2))
         cfg.use_schedule_free = bool(t.get("use_schedule_free", cfg.use_schedule_free))
         cfg.sf_beta = float(t.get("sf_beta", cfg.sf_beta))
         cfg.sf_gamma_factor = float(t.get("sf_gamma_factor", cfg.sf_gamma_factor))
         cfg.use_cautious = bool(t.get("use_cautious", cfg.use_cautious))
+        cfg.use_adafactor = bool(t.get("use_adafactor", cfg.use_adafactor))
         cfg.use_dispersion_loss = bool(t.get("use_dispersion_loss", cfg.use_dispersion_loss))
         cfg.dispersion_weight = float(t.get("dispersion_weight", cfg.dispersion_weight))
         cfg.dispersion_temperature = float(t.get("dispersion_temperature", cfg.dispersion_temperature))
+        cfg.use_salt = bool(t.get("use_salt", cfg.use_salt))
+        cfg.salt_teacher_profile = str(t.get("salt_teacher_profile", cfg.salt_teacher_profile))
+        cfg.salt_kd_temperature = float(t.get("salt_kd_temperature", cfg.salt_kd_temperature))
+        cfg.salt_kd_alpha = float(t.get("salt_kd_alpha", cfg.salt_kd_alpha))
+        cfg.salt_kd_steps = int(t.get("salt_kd_steps", cfg.salt_kd_steps))
+        cfg.lr_schedule = str(t.get("lr_schedule", cfg.lr_schedule))
+        cfg.wsd_decay_fraction = float(t.get("wsd_decay_fraction", cfg.wsd_decay_fraction))
+        cfg.use_quest = bool(t.get("use_quest", cfg.use_quest))
+        cfg.quest_bits = float(t.get("quest_bits", cfg.quest_bits))
+        cfg.wsd_s_enabled = bool(t.get("wsd_s_enabled", cfg.wsd_s_enabled))
+        cfg.wsd_s_interval = int(t.get("wsd_s_interval", cfg.wsd_s_interval))
+        cfg.wsd_s_decay_steps = int(t.get("wsd_s_decay_steps", cfg.wsd_s_decay_steps))
+        cfg.use_tequila = bool(t.get("use_tequila", cfg.use_tequila))
+        cfg.tequila_lambda = float(t.get("tequila_lambda", cfg.tequila_lambda))
+        cfg.use_hestia = bool(m.get("use_hestia", cfg.use_hestia))
+        cfg.hestia_init_temp = float(t.get("hestia_init_temp", cfg.hestia_init_temp))
+        cfg.hestia_end_temp = float(t.get("hestia_end_temp", cfg.hestia_end_temp))
         cfg.inductor_cache_dir = str(p.get("inductor_cache_dir", cfg.inductor_cache_dir))
         cfg.inductor_cache_clean = bool(p.get("inductor_cache_clean", cfg.inductor_cache_clean))
         cfg.inductor_cache_max_gb = float(p.get("inductor_cache_max_gb", cfg.inductor_cache_max_gb))
@@ -245,6 +283,42 @@ class buselPretrainStage:
         self.no_checkpointing: bool = False
         self.ema: Any = None
         self._logger: Any = None
+        self.teacher_model: Any = None
+        self.teacher_patcher: Any = None
+
+    def _load_teacher_model(self) -> None:
+        """Load teacher model for SALT Knowledge Distillation."""
+        import yaml as _yaml
+        with open("configs/default.yaml", "r", encoding="utf-8") as f:
+            full = _yaml.safe_load(f)
+        
+        teacher_profile_name = self.cfg.salt_teacher_profile
+        if teacher_profile_name not in full["profiles"]:
+            print(f"⚠️ [SALT]: Teacher profile {teacher_profile_name!r} not found, skipping KD")
+            return
+        
+        teacher_profile_dict = full["profiles"][teacher_profile_name]
+        teacher_cfg = buselPretrainConfig.from_profile(teacher_profile_dict)
+        
+        from model.patching import StridedFastBLTPatcher
+        from model.backbone import buselModel
+        
+        self.teacher_patcher = StridedFastBLTPatcher(d_model=teacher_cfg.d_model).to(self.device)
+        self.teacher_model = buselModel(teacher_cfg).to(self.device)
+        
+        checkpoint_path = f"checkpoints/busel_{teacher_profile_name}_FINAL.pt"
+        if os.path.exists(checkpoint_path):
+            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+            from model.checkpoint import load_state_dict_safely
+            load_state_dict_safely(self.teacher_model, checkpoint["model_state_dict"])
+            load_state_dict_safely(self.teacher_patcher, checkpoint["patcher_state_dict"])
+            print(f"🎓 [SALT]: Loaded teacher model from {checkpoint_path}")
+        else:
+            print(f"⚠️ [SALT]: Teacher checkpoint {checkpoint_path!r} not found, training from scratch")
+        
+        self.teacher_model.eval()
+        for param in self.teacher_model.parameters():
+            param.requires_grad = False
 
     def setup(
         self,
@@ -353,14 +427,52 @@ class buselPretrainStage:
             raise FileNotFoundError(f"Path {self.cfg.data_path!r} does not exist")
 
         from model.patching import StridedFastBLTPatcher
+        from model.layers import configure_bitlinear
         from model.backbone import buselModel
         from training.optimizer import buselOptimizerEngine
         from training.autopilot import buselAutoPilot
         from training.recipe import buselLossEngine, validate_training_schedule
 
+        hestia_temp = None
+        if self.cfg.use_hestia:
+            hestia_temp = torch.tensor(self.cfg.hestia_init_temp, device=self.device, dtype=torch.float32)
+        configure_bitlinear(
+            use_tequila=self.cfg.use_tequila,
+            tequila_lambda=self.cfg.tequila_lambda,
+            hestia_temperature=hestia_temp,
+        )
+
         self.patcher = StridedFastBLTPatcher(d_model=self.cfg.d_model).to(self.device)
         self.model = buselModel(self.cfg).to(self.device)
         total_params = sum(p.numel() for p in self.model.parameters())
+
+        _SCALE_THRESHOLD = 50_000_000
+        if total_params < _SCALE_THRESHOLD:
+            _scale_warnings = []
+            if self.cfg.optimizer_type in ("soap",):
+                self.cfg.optimizer_type = "lotus_muon"
+                _scale_warnings.append(f"SOAP disabled (<50M: {total_params:,}). Using lotus_muon.")
+            if self.cfg.optimizer_type == "muonq":
+                self.cfg.optimizer_type = "lotus_muon"
+                _scale_warnings.append(f"MuonQ disabled (<50M: {total_params:,}). Using lotus_muon.")
+            if self.cfg.use_adafactor:
+                self.cfg.use_adafactor = False
+                _scale_warnings.append("Adafactor disabled (<50M). Using AdamW.")
+            if self.cfg.use_quest:
+                self.cfg.use_quest = False
+                _scale_warnings.append("QuEST disabled (<50M).")
+            if self.cfg.use_hestia:
+                self.cfg.use_hestia = False
+                _scale_warnings.append("Hestia disabled (<50M).")
+            if self.cfg.use_qknorm_l2:
+                self.cfg.use_qknorm_l2 = False
+                _scale_warnings.append("QK-Norm L2 disabled (<50M).")
+            if self.cfg.optimizer_type in ("normuon", "norlotus_muon"):
+                self.cfg.optimizer_type = "lotus_muon"
+                _scale_warnings.append(f"NorMuon disabled (<50M: {total_params:,}). Using lotus_muon.")
+            for w in _scale_warnings:
+                print(f"⚠️  [SCALE-GATE]: {w}")
+
         log_event(
             "model_initialized",
             profile=profile_name,
@@ -372,14 +484,27 @@ class buselPretrainStage:
         if self.cfg.max_steps == "auto" or self.cfg.max_steps is None:
             global_batch = self.cfg.batch_size * self.cfg.grad_accum_steps
             tokens_per_step = global_batch * (self.cfg.chunk_size // 4)
-            chinchilla = 80 * total_params
-            self.cfg.max_steps = math.ceil(chinchilla / tokens_per_step)
+            # Busel Scaling Laws: two-tier model
+            #   - Small models (<3B params): 37 tok/param (empirical, from 2.68M-param benchmark)
+            #   - Large models (≥3B params): 80 tok/param (BitNet scaling, matches Chinchilla for fp16)
+            # See README "Busel Scaling Laws" for full derivation.
+            _BUSEL_THRESHOLD = 3_000_000_000  # 3B params
+            _SMALL_TOKENS_PER_PARAM = 37
+            _LARGE_TOKENS_PER_PARAM = 80
+            if total_params >= _BUSEL_THRESHOLD:
+                tokens_per_param = _LARGE_TOKENS_PER_PARAM
+            else:
+                tokens_per_param = _SMALL_TOKENS_PER_PARAM
+            busel_tokens = tokens_per_param * total_params
+            self.cfg.max_steps = math.ceil(busel_tokens / tokens_per_step)
             log_event(
-                "chinchilla_planned",
-                target_tokens=chinchilla,
+                "busel_scaling_planned",
+                target_tokens=busel_tokens,
                 planned_steps=self.cfg.max_steps,
                 tokens_per_step=tokens_per_step,
                 global_batch_size=global_batch,
+                tokens_per_param=tokens_per_param,
+                total_params=total_params,
             )
         else:
             self.cfg.max_steps = int(self.cfg.max_steps)
@@ -428,6 +553,9 @@ class buselPretrainStage:
             sf_beta=self.cfg.sf_beta,
             sf_gamma_factor=self.cfg.sf_gamma_factor,
             use_cautious=self.cfg.use_cautious,
+            use_adafactor=self.cfg.use_adafactor,
+            use_quest=self.cfg.use_quest,
+            quest_bits=self.cfg.quest_bits,
         )
         self.autopilot = buselAutoPilot(
             self.opt_engine,
@@ -436,8 +564,18 @@ class buselPretrainStage:
             target_wd=self.cfg.weight_decay,
             warmup_steps=self.cfg.warmup_steps,
             min_lr_ratio=self.cfg.min_lr_ratio,
+            lr_schedule=self.cfg.lr_schedule,
+            wsd_decay_fraction=self.cfg.wsd_decay_fraction,
+            wsd_s_enabled=self.cfg.wsd_s_enabled,
+            wsd_s_interval=self.cfg.wsd_s_interval,
+            wsd_s_decay_steps=self.cfg.wsd_s_decay_steps,
         )
         self.loss_engine = buselLossEngine(self.cfg.vocab_size)
+
+        self.teacher_model = None
+        self.teacher_patcher = None
+        if self.cfg.use_salt and self.cfg.salt_kd_steps > 0:
+            self._load_teacher_model()
 
         if self.cfg.use_ema:
             from training.optimizer import EMA
@@ -465,6 +603,7 @@ class buselPretrainStage:
             batch_size=self.cfg.batch_size,
             start_file_idx=self.start_file_idx,
             start_byte_offset=self.start_byte_offset,
+            num_workers=0,
         )
         self.dataloader_iter = iter(self.dataloader)
 
@@ -515,6 +654,13 @@ class buselPretrainStage:
         for step_offset in range(self.cfg.max_steps):
             step = self.start_step + step_offset
             progress = float(step) / float(self.cfg.max_steps) if self.cfg.max_steps else 0.0
+
+            if self.cfg.use_hestia and hestia_temp is not None:
+                import math as _math
+                cosine_decay = 0.5 * (1.0 + _math.cos(_math.pi * progress))
+                hestia_val = self.cfg.hestia_end_temp + (self.cfg.hestia_init_temp - self.cfg.hestia_end_temp) * cosine_decay
+                hestia_temp.fill_(hestia_val)
+
             if os.path.exists(_STOP_FILE):
                 print(f"\n🛑 Graceful stop requested (file {_STOP_FILE} present) at step {step}.")
                 log_event("stop_requested", step=step, reason="stop_file_present", profile=self.profile_name)
@@ -548,6 +694,7 @@ class buselPretrainStage:
                     batch_size=current_batch_size,
                     start_file_idx=self.global_current_file_idx,
                     start_byte_offset=self.global_current_byte_offset,
+                    num_workers=0,
                 )
                 self.dataloader_iter = iter(self.dataloader)
                 try:
@@ -598,6 +745,18 @@ class buselPretrainStage:
                             weight=self.cfg.dispersion_weight,
                             temperature=self.cfg.dispersion_temperature,
                         )
+                    if self.cfg.use_salt and self.teacher_model is not None and step < self.cfg.salt_kd_steps:
+                        with torch.no_grad():
+                            teacher_patches = self.teacher_patcher(input_bytes)
+                            (teacher_logits_t1, _, _, _), _ = self.teacher_model(
+                                teacher_patches, [targets], progress=progress
+                            )
+                        kd_loss = self.loss_engine.compute_kd_loss(
+                            logits_t1, teacher_logits_t1, targets,
+                            temperature=self.cfg.salt_kd_temperature,
+                            alpha=self.cfg.salt_kd_alpha,
+                        )
+                        loss = loss + kd_loss
 
                 loss = loss / self.cfg.grad_accum_steps
                 loss.backward()

@@ -251,7 +251,12 @@ def pipeline(
 
 PROFILE_LADDER = ["chyzh", "shpak", "zubr"]
 PROFILE_PARAMS = {"chyzh": 10_000_000, "shpak": 55_000_000, "zubr": 120_000_000}
-CHINCHILLA = {p: 80 * n for p, n in PROFILE_PARAMS.items()}
+# Two-tier Busel Scaling: <3B params → 37 tok/param, ≥3B → 80 tok/param
+_BUSEL_THRESHOLD = 3_000_000_000
+BUSEL_SCALING = {
+    p: (80 if n >= _BUSEL_THRESHOLD else 37) * n
+    for p, n in PROFILE_PARAMS.items()
+}
 
 
 def _load_profile_block(profile: str) -> dict:
@@ -261,19 +266,17 @@ def _load_profile_block(profile: str) -> dict:
     return full["profiles"][profile]
 
 
-def plan_escalation(target: str, max_steps: int | None = None, vram_gb: float = 16.0, chin_cap: float = 1.5) -> dict:
-    """🪜 Smart escalation planner: derive ladder + per-stage config from target.
+def plan_escalation(target: str, max_steps: int | None = None, vram_gb: float = 16.0, busel_cap: float = 1.5) -> dict:
+    """Smart escalation planner: derive ladder + per-stage config from target.
 
-    Default semantics: "as long as possible" = Chinchilla-optimal max_steps.
+    Default semantics: "as long as possible" = Busel-scaling-optimal max_steps.
     Optional: pass --max-steps N to cap total training across all stages.
 
-    Scaling laws applied:
-      - Chinchilla: D_pretrain = 80 × N_params bytes
-      - Time per step ∝ batch × ctx × params (linear in tokens × model size)
-      - max_steps capped at chin_cap × Chinchilla steps to avoid overtraining small models
-       - batch_size, chunk_size read from `configs/default.yaml` profile
-         (no hardcoded safety caps, no pre-baked step-time estimate — ETA
-          is computed in real time from observed step throughput)
+    Busel Scaling Laws (two-tier, experimental, 2026-06-08):
+      - Small models (<3B params): D = 37 x N_params tokens
+      - Large models (≥3B params): D = 80 x N_params tokens (matches BitNet/chinchilla for fp16)
+      - Ternary weights hold ~30x less info per param → small models saturate earlier
+      - Large models regain fp16-equivalent scaling per BitNet Reloaded findings
     """
     if target not in PROFILE_LADDER:
         raise ValueError(f"target must be one of {PROFILE_LADDER}, got {target!r}")
@@ -291,21 +294,21 @@ def plan_escalation(target: str, max_steps: int | None = None, vram_gb: float = 
         chunk_size = int(prof["data"]["chunk_size"])
         batch_size = int(prof["data"]["batch_size"])
         tokens_per_step = batch_size * (chunk_size // 4)
-        chin_tokens = CHINCHILLA[profile]
-        chin_steps = int(chin_tokens / tokens_per_step)
-        cap_steps = int(chin_cap * chin_steps)
+        busel_tokens = BUSEL_SCALING[profile]
+        busel_steps = int(busel_tokens / tokens_per_step)
+        cap_steps = int(busel_cap * busel_steps)
         candidates = [cap_steps]
         if per_stage_cap is not None:
             candidates.append(per_stage_cap)
         max_steps_actual = min(candidates)
-        chin_pct = 100.0 * (max_steps_actual * tokens_per_step) / chin_tokens
+        busel_pct = 100.0 * (max_steps_actual * tokens_per_step) / busel_tokens
         stages.append(
             {
                 "profile": profile,
                 "batch_size": batch_size,
                 "chunk_size": chunk_size,
                 "max_steps": max_steps_actual,
-                "chinchilla_pct": chin_pct,
+                "busel_scaling_pct": busel_pct,
             }
         )
 
@@ -335,7 +338,7 @@ def _write_escalation_yaml(plan: dict, path: str, recompile: bool = False, resum
                 "params": params,
             }
         )
-    cap_note = f"max_steps={plan['max_steps']}" if plan.get("max_steps") else "as long as possible (Chinchilla)"
+    cap_note = f"max_steps={plan['max_steps']}" if plan.get("max_steps") else "as long as possible (Busel scaling)"
     pipeline_dict = {
         "name": f"escalate-{plan['target']}",
         "description": f"Smart escalation: {' → '.join(plan['ladder'])} | {cap_note}",
@@ -348,20 +351,20 @@ def _write_escalation_yaml(plan: dict, path: str, recompile: bool = False, resum
 
 def _print_escalation_plan(plan: dict) -> None:
     typer.echo(typer.style("\n🪜 SMART ESCALATION PLAN", fg=typer.colors.CYAN, bold=True))
-    cap_text = f"max_steps={plan['max_steps']}" if plan.get("max_steps") else "as long as possible (Chinchilla)"
+    cap_text = f"max_steps={plan['max_steps']}" if plan.get("max_steps") else "as long as possible (Busel scaling)"
     typer.echo(typer.style(f"   target: {plan['target']} | ladder: {' → '.join(plan['ladder'])} | VRAM={plan['vram_gb']:.0f} GB | {cap_text}", fg=typer.colors.CYAN))
     typer.echo("")
-    typer.echo(f"   {'profile':>8} {'max_steps':>11} {'batch':>6} {'chunk':>6} {'chin_%':>7}    eta: real-time (in run log)")
+    typer.echo(f"   {'profile':>8} {'max_steps':>11} {'batch':>6} {'chunk':>6} {'busel_%':>7}    eta: real-time (in run log)")
     for s in plan["stages"]:
         typer.echo(
-            f"   {s['profile']:>8} {s['max_steps']:>11,} {s['batch_size']:>6} {s['chunk_size']:>6} {s['chinchilla_pct']:>6.1f}%"
+            f"   {s['profile']:>8} {s['max_steps']:>11,} {s['batch_size']:>6} {s['chunk_size']:>6} {s['busel_scaling_pct']:>6.1f}%"
         )
     typer.echo("")
 
 
 def escalate(
     target: str = typer.Option("shpak", "--target", "-t", help="Target profile: chyzh | shpak | zubr"),
-    max_steps: int | None = typer.Option(None, "--max-steps", help="Cap total training across all stages (default: train to Chinchilla)"),
+    max_steps: int | None = typer.Option(None, "--max-steps", help="Cap total training across all stages (default: train to Busel scaling optimal)"),
     vram_gb: float = typer.Option(16.0, "--vram", help="Available VRAM in GB (clamps batch_size)"),
     recompile: bool = typer.Option(False, "--recompile", help="Wipe Inductor cache before compiling (default: reuse cache)"),
     resume: str | None = typer.Option(None, "--resume", "-r", help="Path to a checkpoint to resume from (e.g. checkpoints/busel_shpak_step_700.pt)"),
@@ -373,7 +376,7 @@ def escalate(
     if dry_run:
         typer.echo(typer.style("🏁 Dry-run complete. No execution.", fg=typer.colors.YELLOW))
         return
-    yaml_name = f".escalate-{target}-{max_steps}" if max_steps else f".escalate-{target}-chinchilla"
+    yaml_name = f".escalate-{target}-{max_steps}" if max_steps else f".escalate-{target}-busel"
     yaml_path = f"configs/pipelines/{yaml_name}.yaml"
     _write_escalation_yaml(plan, yaml_path, recompile=recompile, resume=resume)
     typer.echo(typer.style(f"📝 Plan persisted to {yaml_path}", fg=typer.colors.GREEN))

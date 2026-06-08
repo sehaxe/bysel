@@ -25,6 +25,7 @@ FMT_PROMPT_CHOSEN_REJECTED = "prompt_chosen_rejected"
 FMT_INSTRUCTION_INPUT_OUTPUT = "instruction_input_output"
 FMT_CODE_PROBLEM_SOLUTION = "code_problem_solution"
 FMT_TOOL_CALL = "tool_call"
+FMT_CONVERSATIONS = "conversations"  # HF 'conversations' field: list[{from, value}]
 
 
 PRESETS: dict[str, dict[str, Any]] = {
@@ -67,6 +68,26 @@ PRESETS: dict[str, dict[str, Any]] = {
         "output_subdir": "dpo/general",
         "description": "General preference pairs from UltraFeedback (English)",
         "license": "CC BY-NC 4.0",
+    },
+    "sft-shpak-glm-reasoning": {
+        "stage": STAGE_SFT,
+        "hf_dataset": "Jackrong/GLM-5.1-Reasoning-1M-Cleaned",
+        "split": "train",
+        "limit": 50000,
+        "format_adapter": FMT_CONVERSATIONS,
+        "output_subdir": "sft/reasoning",
+        "description": "Chain-of-thought reasoning from GLM-5.1 (746K English, CoT with <think> tags)",
+        "license": "Apache 2.0",
+    },
+    "sft-shpak-claude-trace": {
+        "stage": STAGE_SFT,
+        "hf_dataset": "Jackrong/Claude-opus-4.7-TraceInversion-5000x",
+        "split": "train",
+        "limit": 5000,
+        "format_adapter": FMT_CONVERSATIONS,
+        "output_subdir": "sft/trace",
+        "description": "Claude Opus 4.7 trace inversion — inverted CoT + clean answers (5K English)",
+        "license": "Apache 2.0",
     },
 }
 
@@ -122,6 +143,7 @@ __all__ = [
     "FMT_INSTRUCTION_INPUT_OUTPUT",
     "FMT_CODE_PROBLEM_SOLUTION",
     "FMT_TOOL_CALL",
+    "FMT_CONVERSATIONS",
     "list_presets",
     "get_preset",
     "resolve_preset",

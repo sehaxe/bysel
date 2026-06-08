@@ -44,10 +44,11 @@ in whether the *scaling-laws ceiling* can be pushed down by:
    full Muon) and everything else (norms, biases, embeddings, router) goes
    through AdamW. Params are subdivided by layer type (attn, ffn, mtp,
    norm, embed, router) for **decoupled per-layer LR multipliers**.
-   `buselAutoPilot` v6.0 — predictive 3σ dampening, adaptive gradient
-   clipping, dynamic weight decay. **MoE Top-1** routing (1 of N experts
-   per token) cuts routed FFN FLOPs by ~35 %.
-6. **Curriculum + Chinchilla auto-planner** — context grows 64 → 128 → 256
+   `buselAutoPilot` v6.3 — predictive 3σ dampening, adaptive gradient
+   clipping, dynamic weight decay, **WSD-S** checkpoint reuse, **wd33**
+   QAT schedule. **MoE Top-1** routing (1 of N experts per token) cuts
+   routed FFN FLOPs by ~35 %.
+6. **Curriculum + Busel auto-planner** — context grows 64 → 128 → 256
    patches, batch adapts inversely to hold VRAM constant, and the exact step
    count is derived from the Chinchilla byte-law
    `D ≈ 80 × N` for the profile in use.
@@ -72,6 +73,45 @@ in whether the *scaling-laws ceiling* can be pushed down by:
       kernels). Quality benefit (paper: +0.32 PPL on 0.5B) unproven at busel
       scale. Code, tests, and config lines deleted.
     - See `tests/v58_profile.py` for the 2-mode profile comparison (v6.0 cumulative + v6.1 dispersion).
+
+10. **v6.2–v6.3 research features** (2024–2026 papers, opt-in via YAML profiles):
+    - **SOAP** (Vyas et al. 2025, ICLR 2025) — Shampoo eigenspace + Adam.
+      Maintains factored second-moment estimates L, R per 2D param;
+      periodically eigendecomposes and applies Adam-like update in
+      eigenspace. **−40 % iterations vs AdamW.** Overhead from
+      eigendecomposition every N steps. Profile: `soap`.
+    - **QuEST** (Panferov et al. 2025, ICML 2025) — trust gradient
+      estimator for ternary training. Hadamard rotation whitens weight
+      distribution, MSE-optimal ternary grid fitting, trust gradient
+      correction reduces bias vs naive STE. **~5 % step-time overhead.**
+      Profile: `quest`.
+    - **WSD-S** (ICLR 2025) — Warmup-Stable-Decay with checkpoint reuse.
+      Reuses decay-phase checkpoints for the next cycle. **Outperforms WSD
+      and Cyclic-Cosine.** Profile: `wsds`.
+    - **wd33** (Mapping Schedule × Bit-Width, 2026) — cosine + warmdown
+      to 33 % of peak LR in last 33 % of training. **Optimal at all
+      bit-widths for sub-100 M models.** Tune LR once at FP16. Profile:
+      `wd33`.
+    - **Tequila** (Huang et al. 2025, ICLR 2026) — deadzone trapping fix.
+      Reactivates weights trapped at quantization boundary (|w| < Δ) as
+      dynamic biases, providing direct gradients. **>4 % accuracy gain
+      on ARC.** Zero inference overhead. Profile: `tequila`.
+    - **Hestia** (Wang et al. 2026) — Hessian-guided QAT. Temperature-
+      controlled softmax relaxation replaces STE. Hessian trace drives
+      per-layer temperature annealing. **5.39 % avg zero-shot improvement
+      on Llama-3.2-1B.** Profile: `hestia`.
+    - **MuonQ** (Su et al. 2025) — 4-bit Muon optimizer. Pre-quantization
+      normalization, power-iteration structural decomposition, μ-law
+      companding. **7.3× memory reduction** vs full-precision Muon.
+      Profile: `muonq`.
+    - **50 M+ scale gate** — automatically disables heavy optimizations
+      (SOAP, Adafactor, QuEST, QK-Norm L2, NorMuon, MuonQ, Hestia)
+      when model params < 50 M. Falls back to lotus_muon. These
+      optimizations have overhead that outweighs benefits at small scale.
+    - **IMU-1 measurement** (2 M params, validation profile): −1.7 %
+      speed, +0.3 % loss — overhead from NorMuon normalization,
+      Adafactor factored moments, QK-Norm L2 outweighs benefits at
+      small scale. Benefits only appear at 50 M+.
 
 The codebase is intentionally small — the entire model + training + data
 pipeline is ~3,000 lines of Python and ~140 lines of Rust, so you can read
@@ -217,9 +257,18 @@ material.
 | chyzh      | 192     | 6        | 4       | ~10 M        | ~5 M   | —        | 512 B   |
 | **shpak**  | 384     | 8        | 4       | **52.8 M**   | 25 M   | **11 MB** | 4096 B  |
 | zubr       | 384     | 12       | 8       | **120 M**    | 35 M   | **30 MB** | 16384 B |
+| **imu1**   | 384     | 8        | 4       | **52.8 M**   | 25 M   | **11 MB** | 4096 B  |
+| **soap**   | 384     | 8        | 4       | **52.8 M**   | 25 M   | **11 MB** | 4096 B  |
+| **quest**  | 384     | 8        | 4       | **52.8 M**   | 25 M   | **11 MB** | 4096 B  |
+| **wsds**   | 384     | 8        | 4       | **52.8 M**   | 25 M   | **11 MB** | 4096 B  |
+| **wd33**   | 384     | 8        | 4       | **52.8 M**   | 25 M   | **11 MB** | 4096 B  |
+| **tequila**| 384     | 8        | 4       | **52.8 M**   | 25 M   | **11 MB** | 4096 B  |
+| **hestia** | 384     | 8        | 4       | **52.8 M**   | 25 M   | **11 MB** | 4096 B  |
+| **muonq**  | 384     | 8        | 4       | **52.8 M**   | 25 M   | **11 MB** | 4096 B  |
 
 `max_steps` and `warmup_steps` can be `"auto"` — Busel computes them from
-the Chinchilla byte-law `D ≈ 80 × N` divided by `batch × ctx / 4`.
+the Busel byte-law `D ≈ 37 × N` (small models) or `D ≈ 80 × N` (large models ≥3B)
+divided by `batch × ctx / 4`.
 
 ---
 
@@ -269,6 +318,117 @@ for the full guide and the torch.compile / FakeTensor gotcha.
 
 ---
 
+## Busel Scaling Laws (experimental)
+
+**Chinchilla scaling law** (Hoffmann et al. 2022) says: to optimally train a
+model of **N** parameters, you need **D ≈ 80 × N** tokens of training data.
+For shpak (52.8 M params), that's 80 × 52.8M = **4.2 B tokens**.
+
+Busel's 1.58-bit ternary architecture follows a **two-tier scaling model**:
+
+| Model size | Tokens/param | Source | Rationale |
+|---|---|---|---|
+| **<3B params** | **37** | Busel empirical (2.68M-param benchmark) | Ternary weights hold ~30× less info per param → saturates earlier |
+| **≥3B params** | **80** | BitNet Reloaded / Microsoft (arXiv:2310.11453) | Large 1.58-bit models match fp16 scaling per BitNet findings |
+
+### Small models (<3B params) — 37 tok/param
+
+An experiment on scale_m (2.68 M params, 5 000 steps, RTX 5060 Ti)
+showed:
+
+| Stage | Loss | Tokens Seen | What happens |
+|---|---|---|---|
+| Fast learning | 10.87 → 10.15 | 0 → 33 M | Model absorbs new patterns |
+| Plateau entry | 10.15 → 10.12 | 33 M → 66 M | Loss flattens |
+| **Best loss** | **10.04** | **~95 M** | **Peak performance** |
+| Over-training | 10.04 → 10.26 | 95 M → 328 M | Loss drifts up (noise) |
+
+**Key finding:** Busel reaches best loss at **~37 tokens per parameter**,
+not Chinchilla's 80. The model saturates **2–4× earlier** than a fp16
+transformer.
+
+### Why Busel saturates earlier
+
+1. **Ternary weights** — each parameter stores {-1, 0, +1} = 0.58 bits
+   (vs 16 bits in fp16). A ternary parameter holds ~30× less information
+   than a fp16 parameter, so the model hits its capacity ceiling with less
+   data.
+
+2. **Byte-level vocab (326)** — the embedding matrix is tiny (326 × 128 ≈
+   41 K params). In a standard LLM with BPE vocab 50 K, the embedding
+   matrix alone is 50 K × d_model. Busel spends almost no parameters on
+   embeddings, so all capacity goes to the transformer layers, which learn
+   faster.
+
+3. **mAR + GDN-2** — each layer receives information from ALL previous layers
+   (not just the one below). This makes learning more efficient per parameter,
+   so the model extracts most of what it can from fewer tokens.
+
+4. **MoE Top-1** — only 1 of 4 experts activates per token. Each expert
+   sees 4× fewer gradients per step, so it learns from data more slowly
+   (less gradient diversity per expert), but the total model capacity is
+   higher.
+
+### Practical implications for shpak (52.8 M)
+
+| Method | Tokens needed | Steps | Training time (RTX 5060 Ti) |
+|---|---|---|---|
+| Chinchilla (80 tok/param) | 4.2 B | ~85 900 | ~20 h |
+| **Busel (37 tok/param)** | **~2.0 B** | **~40 000** | **~9–10 h** |
+| Our dataset (10.2 B) | 10.2 B | ~207 000 | ~48 h |
+
+**Bottom line:** Busel needs **2× less training time** than Chinchilla
+predicts for the same model size. Our 10.2 B-token dataset is **5× larger**
+than the Busel-optimal amount — data is not a bottleneck.
+
+### Large models (≥3B params) — 80 tok/param
+
+Microsoft's **BitNet b1.58** paper (arXiv:2310.11453) found that 1.58-bit
+models **≥3B parameters** match fp16 scaling laws (80 tok/param). This was
+confirmed by **BitNet Reloaded** (2024), which showed:
+
+- Small 1.58-bit models need **2× larger hidden** to match fp16 = **½ effective capacity**
+- At 3B+, the scaling converges to fp16 (80 tok/param)
+- Architecture innovations (mAR, MLA, GDN-2) in Busel may push this threshold lower
+
+**Why the difference?** Small ternary models have limited capacity per
+parameter. As models grow, the transformer layers dominate (not embeddings),
+and the architecture innovations (mAR, MoE, GDN-2) compensate for the
+reduced bit-width. At 3B+, the model has enough capacity to match fp16
+scaling.
+
+### Two-tier auto-planner
+
+The auto-planner automatically selects the right scaling law:
+
+```python
+if total_params >= 3_000_000_000:  # 3B params
+    tokens_per_param = 80  # BitNet/chinchilla scaling
+else:
+    tokens_per_param = 37  # Busel empirical scaling
+```
+
+For shpak (52.8M < 3B): uses 37 tok/param → ~2.0B tokens optimal.
+For a hypothetical 5B model: uses 80 tok/param → ~400B tokens optimal.
+
+### Caveats
+
+- This is a **single experiment** on a 2.68 M-param model. The scaling
+  exponent may differ at 50 M+ parameters.
+- Loss includes MTP-4 auxiliary losses (MoE load balance, future-token
+  predictions). The "pure next-byte" loss is ~0.3 nats lower.
+- Optimal tokens/param depends on architecture details (n_hyper, expert
+  count, context length). More experiments at multiple sizes are needed
+  to establish a precise power-law fit.
+
+To reproduce:
+```bash
+uv run python tests/scaling_laws.py --steps 5000   # ~50 min on RTX 5060 Ti
+uv run python tests/scaling_laws.py --plot-only     # re-plot from saved CSV
+```
+
+---
+
 ## CLI surface
 
 ```bash
@@ -285,6 +445,9 @@ uv run python tests/profiler_run.py                                      # defau
 uv run python tests/profiler_run.py --optimizer-type muon --top-k 2      # ablation: pre-LOTUS, pre-Top-1
 uv run python tests/profiler_run.py --backend torch --trace checkpoints/profiler.json   # CUDA kernel-level
 uv run python tests/profiler_run.py --steps 50 --no-grad-ckpt            # 50 steps, no checkpointing
+
+# Quick IMU-1 vs baseline profiler (2M params, ~5 min)
+uv run python tests/quick_imu1_profile.py                               # baseline vs imu1 comparison
 
 uv run python tools/plotter.py            # plot loss / lr / grad norm
 uv run python tools/orchestrator.py download --preset shpak
@@ -347,7 +510,7 @@ web-dashboard's primary input. Stable schema:
 }
 ```
 
-Events emitted: `training_start`, `model_initialized`, `chinchilla_planned`,
+Events emitted: `training_start`, `model_initialized`, `busel_scaling_planned`,
 `curriculum_upgrade`, `step_complete`, `checkpoint_saved` /
 `checkpoint_rejected` / `checkpoint_failed`, `emergency_save_requested`,
 `emergency_checkpoint`, `stage_complete`, `pipeline_start` /
@@ -423,6 +586,13 @@ Busel stands on the shoulders of:
 - **Muon** (Keller Jordan, 2024) — Newton-Schulz orthogonaliser for 2D
   weights
 - **LOTUS** (arXiv:2602.01233) — rank-r factorised Muon momentum
+- **SOAP** (Vyas et al., 2025, ICLR 2025) — Shampoo eigenspace + Adam
+- **QuEST** (Panferov et al., 2025, ICML 2025) — trust gradient for ternary training
+- **WSD-S** (ICLR 2025) — Warmup-Stable-Decay with checkpoint reuse
+- **wd33** (Mapping Schedule × Bit-Width, 2026) — warmdown-to-33 % QAT schedule
+- **Tequila** (Huang et al., 2025, ICLR 2026) — deadzone trapping fix
+- **Hestia** (Wang et al., 2026) — Hessian-guided QAT with softmax relaxation
+- **MuonQ** (Su et al., 2025) — 4-bit Muon via directional fidelity optimization
 - **Multi-Token Prediction** (DeepSeek, 2024) — t+1..t+4 heads with
   decaying loss
 - **Chinchilla scaling** (Hoffmann et al., 2022) — the byte-law

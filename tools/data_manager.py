@@ -12,6 +12,7 @@ from data.presets import (
     FMT_INSTRUCTION_INPUT_OUTPUT,
     FMT_CODE_PROBLEM_SOLUTION,
     FMT_TOOL_CALL,
+    FMT_CONVERSATIONS,
 )
 
 # Ограничиваем потоки pyarrow для предотвращения GIL-конфликтов на выходе
@@ -31,15 +32,15 @@ MULTIMODAL_MANIFEST = os.path.join(DATA_DIR, "multimodal_manifest.jsonl")
 # Инициализируем приложение Typer
 app = typer.Typer()
 
-# Реестр умных пресетов на базе Generalized Chinchilla Scaling Laws (80 байт на параметр)
+# Реестр умных пресетов на базе Busel Scaling Laws (37 токенов на параметр для <3B моделей, 80 для ≥3B)
 PRESETS = {
     "shpak": {
-        "text_limit": 768000,   
+        "text_limit": 360000,   
         "sft_limit": 8000,      
         "vision_limit": 1000    
     },
     "chyzh": {
-        "text_limit": 130000,   
+        "text_limit": 62000,   
         "sft_limit": 2000,      
         "vision_limit": 200     
     }
@@ -394,6 +395,27 @@ def _hf_row_to_sft_jsonl(row: dict, format_adapter: str) -> dict | None:
                 {"role": "assistant", "content": calls_str},
             ]
         }
+
+    if format_adapter == FMT_CONVERSATIONS:
+        conversations = row.get("conversations")
+        if not conversations or not isinstance(conversations, list):
+            return None
+        cleaned = []
+        for turn in conversations:
+            if not isinstance(turn, dict):
+                continue
+            role = str(turn.get("from", turn.get("role", ""))).strip().lower()
+            content = str(turn.get("value", turn.get("content", ""))).strip()
+            if role in ("human", "user"):
+                role = "user"
+            elif role in ("gpt", "assistant", "bot"):
+                role = "assistant"
+            else:
+                continue
+            if not content:
+                continue
+            cleaned.append({"role": role, "content": content})
+        return {"messages": cleaned} if cleaned else None
 
     return None
 
