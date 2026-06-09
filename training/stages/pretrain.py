@@ -280,6 +280,34 @@ class buselPretrainStage:
         self.start_byte_offset: int = 0
         self.no_compile: bool = False
         self.compile_mode: str = "default"
+        self._oom_reductions: int = 0
+        self._max_oom_reductions: int = 6
+
+    def _vram_used_mb(self) -> float:
+        """Current GPU VRAM usage in MB (0 on CPU)."""
+        if self.device == "cuda" and torch.cuda.is_available():
+            return torch.cuda.memory_allocated() / 1024**2
+        return 0.0
+
+    def _vram_total_mb(self) -> float:
+        """Total GPU VRAM in MB (0 on CPU)."""
+        if self.device == "cuda" and torch.cuda.is_available():
+            return torch.cuda.get_device_properties(0).total_mem / 1024**2
+        return 0.0
+
+    def _rebuild_dataloader(self, new_batch_size: int) -> None:
+        """Recreate dataloader with a smaller batch size (OOM recovery)."""
+        from data.pipeline import get_busel_dataloader
+        current_chunk_size = self.cfg.chunk_size // 4
+        self.dataloader = get_busel_dataloader(
+            self.cfg.data_path,
+            chunk_size=current_chunk_size,
+            batch_size=new_batch_size,
+            start_file_idx=self.global_current_file_idx,
+            start_byte_offset=self.global_current_byte_offset,
+            num_workers=0,
+        )
+        self.dataloader_iter = iter(self.dataloader)
         self.no_checkpointing: bool = False
         self.ema: Any = None
         self._logger: Any = None
@@ -683,6 +711,22 @@ class buselPretrainStage:
                 new_batch_size = max(
                     1, (self.cfg.batch_size * (self.cfg.chunk_size // 4)) // new_chunk_size
                 )
+
+                chunk_grows = new_chunk_size > current_chunk_size
+                if chunk_grows and self.device == "cuda":
+                    vram_now = self._vram_used_mb()
+                    vram_total = self._vram_total_mb()
+                    if vram_total > 0 and vram_now / vram_total > 0.80:
+                        print(
+                            f"⏸️  Chunk {current_chunk_size}→{new_chunk_size} blocked: "
+                            f"VRAM {vram_now:.0f}/{vram_total:.0f}MB ({vram_now/vram_total*100:.0f}%) "
+                            f"too high for growth. Staying at chunk={current_chunk_size}"
+                        )
+                        log_event("chunk_growth_blocked", step=step, chunk=current_chunk_size,
+                                  vram_mb=round(vram_now, 1), vram_total_mb=round(vram_total, 1))
+                        new_chunk_size = current_chunk_size
+                        new_batch_size = current_batch_size
+
                 current_chunk_size = new_chunk_size
                 current_batch_size = new_batch_size
 
@@ -707,81 +751,121 @@ class buselPretrainStage:
             accumulated_aux_loss = 0.0
             tokens_this_step = 0
 
-            for _ in range(self.cfg.grad_accum_steps):
-                if current_batch is None:
-                    break
-                byte_batch, last_file_idx, last_byte_offset = current_batch
-                byte_batch = byte_batch.to(self.device, non_blocking=True)
-                self.global_current_file_idx = last_file_idx
-                self.global_current_byte_offset = last_byte_offset
-                input_bytes = (
-                    byte_batch[:, :-self.patcher.stride]
-                    if byte_batch.shape[1] > self.patcher.stride
-                    else byte_batch
-                )
+            _fwd_bwd_ok = False
+            _oom_retry = False
+            for _fwd_bwd_attempt in range(3):
+                try:
+                    self.opt_engine.zero_grad(set_to_none=True)
+                    accumulated_loss = 0.0
+                    accumulated_aux_loss = 0.0
+                    tokens_this_step = 0
 
-                with torch.autocast(
-                    device_type=self.device, dtype=autocast_dtype, enabled=autocast_enabled
-                ):
-                    if self.cfg.use_dispersion_loss:
-                        patches, embed_for_dispersion = self.patcher(input_bytes, return_embedding=True)
-                    else:
-                        patches = self.patcher(input_bytes)
-                    T_patches = patches.shape[1]
-                    targets, mtp_targets = _build_targets(
-                        byte_batch, T_patches, stride=self.patcher.stride
-                    )
-                    (logits_t1, logits_t2, logits_t3, logits_t4), aux_loss = self.model(
-                        patches, [targets] + mtp_targets[:-1], progress=progress
-                    )
-                    loss = self.loss_engine.compute_pretrain_loss(
-                        logits_t1, targets,
-                        [logits_t2, logits_t3, logits_t4],
-                        mtp_targets,
-                    ) + aux_loss.float()
-                    if self.cfg.use_dispersion_loss:
-                        loss = loss + self.loss_engine.compute_dispersion_loss(
-                            embed_for_dispersion,
-                            weight=self.cfg.dispersion_weight,
-                            temperature=self.cfg.dispersion_temperature,
+                    _iter_batch = current_batch
+                    for _ in range(self.cfg.grad_accum_steps):
+                        if _iter_batch is None:
+                            break
+                        byte_batch, last_file_idx, last_byte_offset = _iter_batch
+                        byte_batch = byte_batch.to(self.device, non_blocking=True)
+                        self.global_current_file_idx = last_file_idx
+                        self.global_current_byte_offset = last_byte_offset
+                        input_bytes = (
+                            byte_batch[:, :-self.patcher.stride]
+                            if byte_batch.shape[1] > self.patcher.stride
+                            else byte_batch
                         )
-                    if self.cfg.use_salt and self.teacher_model is not None and step < self.cfg.salt_kd_steps:
-                        with torch.no_grad():
-                            teacher_patches = self.teacher_patcher(input_bytes)
-                            (teacher_logits_t1, _, _, _), _ = self.teacher_model(
-                                teacher_patches, [targets], progress=progress
+
+                        with torch.autocast(
+                            device_type=self.device, dtype=autocast_dtype, enabled=autocast_enabled
+                        ):
+                            if self.cfg.use_dispersion_loss:
+                                patches, embed_for_dispersion = self.patcher(input_bytes, return_embedding=True)
+                            else:
+                                patches = self.patcher(input_bytes)
+                            T_patches = patches.shape[1]
+                            targets, mtp_targets = _build_targets(
+                                byte_batch, T_patches, stride=self.patcher.stride
                             )
-                        kd_loss = self.loss_engine.compute_kd_loss(
-                            logits_t1, teacher_logits_t1, targets,
-                            temperature=self.cfg.salt_kd_temperature,
-                            alpha=self.cfg.salt_kd_alpha,
-                        )
-                        loss = loss + kd_loss
+                            (logits_t1, logits_t2, logits_t3, logits_t4), aux_loss = self.model(
+                                patches, [targets] + mtp_targets[:-1], progress=progress
+                            )
+                            loss = self.loss_engine.compute_pretrain_loss(
+                                logits_t1, targets,
+                                [logits_t2, logits_t3, logits_t4],
+                                mtp_targets,
+                            ) + aux_loss.float()
+                            if self.cfg.use_dispersion_loss:
+                                loss = loss + self.loss_engine.compute_dispersion_loss(
+                                    embed_for_dispersion,
+                                    weight=self.cfg.dispersion_weight,
+                                    temperature=self.cfg.dispersion_temperature,
+                                )
+                            if self.cfg.use_salt and self.teacher_model is not None and step < self.cfg.salt_kd_steps:
+                                with torch.no_grad():
+                                    teacher_patches = self.teacher_patcher(input_bytes)
+                                    (teacher_logits_t1, _, _, _), _ = self.teacher_model(
+                                        teacher_patches, [targets], progress=progress
+                                    )
+                                kd_loss = self.loss_engine.compute_kd_loss(
+                                    logits_t1, teacher_logits_t1, targets,
+                                    temperature=self.cfg.salt_kd_temperature,
+                                    alpha=self.cfg.salt_kd_alpha,
+                                )
+                                loss = loss + kd_loss
 
-                loss = loss / self.cfg.grad_accum_steps
-                loss.backward()
-                accumulated_loss += loss.item() * self.cfg.grad_accum_steps
-                accumulated_aux_loss += aux_loss.item()
-                tokens_this_step = current_batch_size * current_chunk_size
-                cumulative_processed_tokens += tokens_this_step
+                        loss = loss / self.cfg.grad_accum_steps
+                        loss.backward()
+                        accumulated_loss += loss.item() * self.cfg.grad_accum_steps
+                        accumulated_aux_loss += aux_loss.item()
+                        tokens_this_step = current_batch_size * current_chunk_size
+                        cumulative_processed_tokens += tokens_this_step
 
-                next_batch = None
-                if use_cuda_stream:
-                    with torch.cuda.stream(prefetch_stream):
-                        try:
-                            next_batch = next(self.dataloader_iter)
-                        except StopIteration:
-                            next_batch = None
-                else:
-                    try:
-                        next_batch = next(self.dataloader_iter)
-                    except StopIteration:
                         next_batch = None
-                if use_cuda_stream:
-                    torch.cuda.current_stream().wait_stream(prefetch_stream)
-                current_batch = next_batch
+                        if use_cuda_stream:
+                            with torch.cuda.stream(prefetch_stream):
+                                try:
+                                    next_batch = next(self.dataloader_iter)
+                                except StopIteration:
+                                    next_batch = None
+                        else:
+                            try:
+                                next_batch = next(self.dataloader_iter)
+                            except StopIteration:
+                                next_batch = None
+                        if use_cuda_stream:
+                            torch.cuda.current_stream().wait_stream(prefetch_stream)
+                        _iter_batch = next_batch
 
-            if current_batch is None and accumulated_loss == 0.0:
+                    current_batch = _iter_batch
+                    _fwd_bwd_ok = True
+                    break
+
+                except torch.cuda.OutOfMemoryError:
+                    if self.device != "cuda":
+                        raise
+                    torch.cuda.empty_cache()
+                    self._oom_reductions += 1
+                    old_bs = current_batch_size
+                    current_batch_size = max(1, current_batch_size // 2)
+                    self.cfg.batch_size = current_batch_size
+                    self._rebuild_dataloader(current_batch_size)
+                    print(
+                        f"⚠️  OOM at step {step}! batch {old_bs}→{current_batch_size} "
+                        f"(attempt {self._oom_reductions}/{self._max_oom_reductions})"
+                    )
+                    log_event(
+                        "oom_recovery",
+                        step=step,
+                        old_batch=old_bs,
+                        new_batch=current_batch_size,
+                        vram_mb=round(self._vram_used_mb(), 1),
+                    )
+                    _oom_retry = True
+                    cumulative_processed_tokens -= tokens_this_step
+                    continue
+
+            if not _fwd_bwd_ok:
+                print(f"❌ OOM: gave up after {self._oom_reductions} reductions at step {step}")
+                log_event("oom_gave_up", step=step, batch=current_batch_size)
                 break
 
             dynamic_clip = self.autopilot.before_step(self.model, step, self.cfg.max_steps)
@@ -791,6 +875,17 @@ class buselPretrainStage:
             self.opt_engine.step()
             if self.ema is not None:
                 self.ema.update(self.model)
+
+            if self.device == "cuda" and current_batch_size > 1 and self._oom_reductions < self._max_oom_reductions:
+                vram_now = self._vram_used_mb()
+                vram_total = self._vram_total_mb()
+                if vram_total > 0 and vram_now / vram_total > 0.88:
+                    old_bs = current_batch_size
+                    current_batch_size = max(1, current_batch_size - 1)
+                    self.cfg.batch_size = current_batch_size
+                    self._rebuild_dataloader(current_batch_size)
+                    print(f"📉 VRAM {vram_now:.0f}/{vram_total:.0f}MB ({vram_now/vram_total*100:.0f}%) → batch {old_bs}→{current_batch_size}")
+                    log_event("vram_auto_reduce", step=step, old_batch=old_bs, new_batch=current_batch_size, vram_mb=round(vram_now, 1))
 
             if self._emergency_save_requested["value"]:
                 os.makedirs("checkpoints", exist_ok=True)
