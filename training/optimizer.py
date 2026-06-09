@@ -851,6 +851,6 @@ class EMA:
 
     def load_state_dict(self, sd: dict):
         self.shadow = {
-            k.removeprefix("_orig_mod."): (v.float() if v.dtype.is_floating_point else v.clone())
+            k: (v.float() if v.dtype.is_floating_point else v.clone())
             for k, v in sd.items()
         }
